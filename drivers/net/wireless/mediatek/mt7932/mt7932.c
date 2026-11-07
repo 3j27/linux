@@ -365,12 +365,22 @@ static int mt_submit(struct mt7932 *m, struct mt7932_ring *q, size_t length)
 	return 0;
 }
 
-/* One caller, one outstanding command, no retry after uncertain completion. */
-int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, bool wait,
-		      const void *payload, size_t length)
+/* One caller, one outstanding command, no retry after uncertain completion.
+ *
+ * Commands use one of the firmware's two descriptors. The original one carries
+ * the command id in byte 36 and the extension id in byte 41; every existing
+ * caller sends that. The unified one carries a 16-bit command id in bytes
+ * 34-35, an option byte at 43 (ACK, unified command, SET or QUERY) and is
+ * answered with EID 0x01. Both are the descriptors the mt76 connac drivers
+ * send to the same firmware family.
+ */
+static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
+			  bool runtime, bool set, bool wait,
+			  const void *payload, size_t length)
 {
 	struct mt7932_ring *q = &m->tx[17];
 	unsigned long flags;
+	u8 *buffer;
 	int ret;
 
 	if (READ_ONCE(m->stopping))
@@ -384,16 +394,35 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 			return -ENOSPC;
 		q->used = 0;
 	}
+	buffer = q->buffers + q->used * STRIDE;
 	if (!++m->seq)
 		m->seq = 1;
-	ret = mt7932_envelope(q->buffers + q->used * STRIDE, STRIDE,
-			      cid, ext, m->seq, runtime, set, wait, payload, length);
-	if (ret < 0)
-		return ret;
+	if (uni) {
+		size_t total = MT7932_UNI_ENVELOPE + length;
+
+		if (!length || total > STRIDE)
+			return -EINVAL;
+		memset(buffer, 0, MT7932_UNI_ENVELOPE);
+		put_unaligned_le32(total | (2U << 23), buffer);
+		put_unaligned_le32(0x10000, buffer + 4);
+		put_unaligned_le16(total - 32, buffer + 32);
+		put_unaligned_le16(cid, buffer + 34);
+		buffer[37] = 0xa0;	/* MCU packet id, long format */
+		buffer[39] = m->seq;
+		/* ACK, unified command, and SET or QUERY. */
+		buffer[43] = BIT(0) | BIT(1) | (set ? BIT(2) : 0);
+		memcpy(buffer + MT7932_UNI_ENVELOPE, payload, length);
+		ret = total;
+	} else {
+		ret = mt7932_envelope(buffer, STRIDE, cid, ext, m->seq,
+				      runtime, set, wait, payload, length);
+		if (ret < 0)
+			return ret;
+	}
 	reinit_completion(&m->response);
 	spin_lock_irqsave(&m->response_lock, flags);
 	m->waiting = wait ? m->seq : 0;
-	m->waiting_eid = mt7932_reply_eid(cid, runtime);
+	m->waiting_eid = uni ? 0x01 : mt7932_reply_eid(cid, runtime);
 	m->reply_length = 0;
 	spin_unlock_irqrestore(&m->response_lock, flags);
 	ret = mt_submit(m, q, ret);
@@ -428,10 +457,25 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 	return ret;
 }
 
+int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, bool wait,
+		      const void *payload, size_t length)
+{
+	return mt_request_txd(m, cid, ext, false, runtime, set, wait, payload, length);
+}
+
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length)
 {
 	return mt_request_ext(m, cid, 0, runtime, set, wait, payload, length);
+}
+
+/* A runtime command from the AWDL control channel, in either descriptor
+ * layout. The session commands and the probe path are the only callers.
+ */
+int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool set,
+		   bool wait, const void *payload, size_t length)
+{
+	return mt_request_txd(m, cid, ext, uni, true, set, wait, payload, length);
 }
 
 static int mt_command(struct mt7932 *m, u8 cid, const void *payload, size_t length)

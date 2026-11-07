@@ -894,6 +894,34 @@ static int mt_vendor_awdl_cmd_handler(struct wiphy *wiphy, struct wireless_dev *
 	return err;
 }
 
+/* One firmware command, either descriptor, answered with the raw reply body.
+ * This exists so the AWDL bring-up can talk to command ids the driver has no
+ * typed path for; it is not used by the interface or by ordinary operation.
+ */
+static int mt_vendor_raw_handler(struct wiphy *wiphy, struct wireless_dev *wdev,
+				 const void *data, int len)
+{
+	struct mt7932 *m = mt_from_wiphy(wiphy);
+	const struct mt7932_vndr_raw_cmd *cmd = data;
+	unsigned int body_len;
+	int err;
+
+	if (len < (int)sizeof(*cmd))
+		return -EINVAL;
+	body_len = get_unaligned_le16(&cmd->length);
+	if (body_len != (unsigned int)(len - sizeof(*cmd)) ||
+	    body_len > MT7932_AWDL_BODY_MAX)
+		return -EINVAL;
+	mutex_lock(&m->command_mutex);
+	err = mt_request_mcu(m, get_unaligned_le16(&cmd->cid), cmd->ext, cmd->uni,
+			     cmd->set, cmd->wait, cmd->body, body_len);
+	if (!err && cmd->wait && m->reply_length > 36)
+		err = mt_vendor_awdl_state_reply(wiphy, m->reply + 36,
+						 m->reply_length - 36);
+	mutex_unlock(&m->command_mutex);
+	return err;
+}
+
 const struct wiphy_vendor_command mt7932_vendor_cmds[] = {
 	{
 		{
@@ -914,6 +942,16 @@ const struct wiphy_vendor_command mt7932_vendor_cmds[] = {
 			 WIPHY_VENDOR_CMD_NEED_NETDEV,
 		.policy = VENDOR_CMD_RAW_DATA,
 		.doit = mt_vendor_awdl_cmd_handler
+	},
+	{
+		{
+			.vendor_id = MEDIATEK_OUI,
+			.subcmd = MT7932_VNDR_CMDS_RAW
+		},
+		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+			 WIPHY_VENDOR_CMD_NEED_NETDEV,
+		.policy = VENDOR_CMD_RAW_DATA,
+		.doit = mt_vendor_raw_handler
 	},
 };
 

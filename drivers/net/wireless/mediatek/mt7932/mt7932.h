@@ -319,6 +319,8 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 		      const void *payload, size_t length);
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length);
+int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool set,
+		   bool wait, const void *payload, size_t length);
 void mt_transport_snapshot(struct mt7932 *m);
 int mt_recovery_gate(struct mt7932 *m);
 int mt_cal_procedure(struct mt7932 *m, struct mt7932_cal_piece *pieces,
@@ -379,7 +381,7 @@ int mt_power_init(struct mt7932 *m);
 extern const struct net_device_ops mt_awdl_net_ops;
 extern int mt7932_awdl_trace;
 bool mt7932_awdl_enabled(void);
-extern const struct wiphy_vendor_command mt7932_vendor_cmds[2];
+extern const struct wiphy_vendor_command mt7932_vendor_cmds[3];
 bool mt_awdl_tx_allowed(const struct mt7932 *m);
 int mt_awdl_add_vif(struct wiphy *wiphy, const char *name);
 int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev);

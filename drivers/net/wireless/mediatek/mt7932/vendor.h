@@ -19,6 +19,12 @@ enum mt7932_vendor_cmds {
 	 * one runtime command of the firmware's AWDL session family.
 	 */
 	MT7932_VNDR_CMDS_AWDL_CMD,
+	/* struct mt7932_vndr_raw_cmd plus its body: one firmware command in
+	 * either descriptor layout, answered with the firmware reply. This is
+	 * how the AWDL bring-up probes reach command ids the rest of the
+	 * driver does not use; it refuses nothing but the descriptor itself.
+	 */
+	MT7932_VNDR_CMDS_RAW,
 	MT7932_VNDR_CMDS_LAST
 };
 
@@ -68,6 +74,28 @@ struct mt7932_vndr_awdl_cmd {
 };
 
 /**
+ * struct mt7932_vndr_raw_cmd - one firmware command, for the bring-up probes
+ *
+ * @cid: command id (original layout: low byte only; unified: 16-bit id,
+ *	 MCU command-class bits included)
+ * @uni: 0 for the original descriptor, 1 for the unified one
+ * @ext: extension command id, original descriptor only
+ * @set: 1 for SET, 0 for QUERY (the option byte's SET bit)
+ * @wait: 1 to wait for the firmware reply and return its body
+ * @length: body length
+ * @body: the command body
+ */
+struct mt7932_vndr_raw_cmd {
+	__le16 cid;
+	__u8 uni;
+	__u8 ext;
+	__u8 set;
+	__u8 wait;
+	__le16 length;
+	__u8 body[];
+};
+
+/**
  * enum mt7932_nlattrs - nl80211 message attributes
  *
  * @MT7932_NLATTR_LEN: reply body length
@@ -83,6 +111,6 @@ enum mt7932_nlattrs {
 	MT7932_NLATTR_MAX = __MT7932_NLATTR_AFTER_LAST - 1
 };
 
-extern const struct wiphy_vendor_command mt7932_vendor_cmds[2];
+extern const struct wiphy_vendor_command mt7932_vendor_cmds[3];
 
 #endif
