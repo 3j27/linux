@@ -37,6 +37,13 @@
 #define IRQ_MASK 0xe2c8000d
 #define DONE BIT(31)
 #define STRIDE 8192
+/*
+ * TX0 descriptors published per doorbell. The stack marks a packet that has
+ * another one right behind it with netdev_xmit_more(), so the TX0 doorbell is
+ * rung once per burst instead of once per packet, and at least every
+ * MT7932_TX_BATCH packets so that the device starts on a long burst early.
+ */
+#define MT7932_TX_BATCH 64
 #define RX_STRIDE ALIGN(MT7932_RX_CAPACITY, 64)
 
 DECLARE_EWMA(mt7932_signal, 4, 4)
@@ -228,6 +235,27 @@ struct mt7932 {
 	bool data_ready;
 	bool bss_absent;
 	u8 bss_quota;
+	/* AWDL (firmware BSS 1, see awdl.h). Data-path gates (absent, quota,
+	 * WTBL entry, present, registered) are owned by data_lock, mirroring
+	 * the station BSS; lifecycle pointers and flags are owned by
+	 * response_lock; awdl_enabled is written under command_mutex. Contexts
+	 * that must not take the owning lock read these with READ_ONCE().
+	 */
+	bool awdl_registered, awdl_present, awdl_absent;
+	bool awdl_destroying, awdl_pending, awdl_attaching;
+	bool awdl_active, awdl_enabled;
+	u8 awdl_quota;
+	u16 awdl_wtbl, awdl_tx_seq;
+	struct mt7932_duplicate awdl_duplicates[17];
+	/* TX0 slots carrying AWDL frames; data_lock. */
+	DECLARE_BITMAP(data_awdl, 512);
+	u64 awdl_tx_bytes;
+	u32 awdl_tx_packets;
+	char awdl_ifname[IFNAMSIZ];
+	struct net_device *awdl_netdev;
+	struct wireless_dev *awdl_wdev;
+	struct work_struct awdl_attach_work, awdl_teardown_work;
+	struct delayed_work awdl_timeout;
 	u32 irq_mask;
 	void *ipc, *aux;
 	dma_addr_t ipc_dma, aux_dma;
@@ -344,5 +372,27 @@ int mt_set_power_mgmt(struct wiphy *wiphy, struct net_device *netdev,
 		      bool enabled, int timeout);
 void mt_power_work(struct work_struct *work);
 int mt_power_init(struct mt7932 *m);
+
+/* AWDL; see awdl.h and vendor.h. The works are initialized by
+ * mt_register_interface() and joined by mt_stop_host() and mt_remove().
+ */
+extern const struct net_device_ops mt_awdl_net_ops;
+extern int mt7932_awdl_trace;
+bool mt7932_awdl_enabled(void);
+extern const struct wiphy_vendor_command mt7932_vendor_cmds[2];
+bool mt_awdl_tx_allowed(const struct mt7932 *m);
+int mt_awdl_add_vif(struct wiphy *wiphy, const char *name);
+int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev);
+int mt_awdl_session(struct mt7932 *m, bool enable, u8 master_chan, u8 peer_chan,
+		    u8 density);
+int mt_awdl_data_cmd(struct mt7932 *m, u8 selector, const void *data, size_t length);
+int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN]);
+int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length);
+int mt_awdl_election(struct mt7932 *m, u32 metric, s8 rssi_threshold);
+void mt_awdl_presence(struct mt7932 *m, const struct mt7932_event *event);
+void mt_awdl_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame);
+void mt_awdl_attach_work(struct work_struct *work);
+void mt_awdl_teardown_work(struct work_struct *work);
+void mt_awdl_timeout(struct work_struct *work);
 
 #endif

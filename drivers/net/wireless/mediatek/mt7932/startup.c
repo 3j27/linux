@@ -841,6 +841,14 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	m->wiphy->max_scan_ssids = MT7932_SCAN_SSIDS;
 	m->wiphy->max_scan_ie_len = 600;
 	m->wiphy->reg_notifier = mt_regulatory_notify;
+	/* The AWDL vendor commands are the only way in: nl80211 has no AWDL
+	 * interface type, so the interface is created from the vendor command
+	 * exactly as brcmfmac exposes the same firmware feature.
+	 */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) && mt7932_awdl_enabled()) {
+		m->wiphy->vendor_commands = mt7932_vendor_cmds;
+		m->wiphy->n_vendor_commands = ARRAY_SIZE(mt7932_vendor_cmds);
+	}
 	/* World roaming may relax NO_IR after observing an AP beacon without
 	 * changing alpha2. Request the callback so firmware's CID0f domain is
 	 * updated through the same idle/scan fence as other regulatory changes.

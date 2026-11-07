@@ -162,6 +162,11 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		goto unlock;
 	}
 	if (event.eid == 0x11) {
+		/* Both BSSs answer with EID 0x11; each handler checks its
+		 * own BSS index in the body and ignores the other's.
+		 */
+		if (IS_ENABLED(CONFIG_MT7932_AWDL))
+			mt_awdl_presence(m, &event);
 		mt_bss_presence(m, &event);
 		goto unlock;
 	}
@@ -1141,6 +1146,15 @@ static void mt_remove(struct pci_dev *pdev)
 		unregister_netdev(m->netdev);
 		free_netdev(m->netdev);
 		m->netdev = NULL;
+	}
+	if (m->awdl_netdev) {
+		unregister_netdev(m->awdl_netdev);
+		free_netdev(m->awdl_netdev);
+		m->awdl_netdev = NULL;
+	}
+	if (m->awdl_wdev) {
+		kfree(m->awdl_wdev);
+		m->awdl_wdev = NULL;
 	}
 	if (m->wiphy_registered)
 		wiphy_unregister(m->wiphy);

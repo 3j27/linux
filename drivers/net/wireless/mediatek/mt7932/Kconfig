@@ -29,6 +29,28 @@ config MT7932_FULLMAC
 	  unloaded. A function that fails to initialize and cannot be reset
 	  stays bound and keeps its DMA memory.
 
+config MT7932_AWDL
+	bool "Apple Wireless Direct Link (AirDrop) peer networking"
+	depends on MT7932_FULLMAC
+	default y
+	help
+	  Advertise the Wi-Fi vendor commands the Apple Wireless Direct
+	  Link stack needs, and carry its frames. The firmware keeps AWDL
+	  off until a peer app asks for it, and this option only advertises
+	  the interface and hands frames to it. Say Y to use AirDrop and
+	  Nearby networking with an Apple device; nothing changes for
+	  ordinary station use.
+
+config MT7932_AWDL_KUNIT_TEST
+	bool "KUnit tests for MT7932 Apple Wireless Direct Link framing" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && MT7932_AWDL
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise the Apple Wireless Direct Link frame envelope with
+	  synthetic frames and without radio hardware: the fixed
+	  destination and the AWDL ethertype, the length and sequence
+	  checks, and frames that are too short or use another type.
+
 config MT7932_RF_KUNIT_TEST
 	bool "KUnit tests for MT7932 terminal RF failure" if !KUNIT_ALL_TESTS
 	depends on KUNIT=y && MT7932_FULLMAC

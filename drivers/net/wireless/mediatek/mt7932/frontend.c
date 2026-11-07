@@ -640,6 +640,11 @@ int mt_register_interface(struct mt7932 *m)
 	init_completion(&m->scan_done);
 	m->peer_alloc = BIT(0) | BIT(19);
 	INIT_DELAYED_WORK(&m->scan_timeout_work, mt_scan_timeout_work);
+	if (IS_ENABLED(CONFIG_MT7932_AWDL)) {
+		INIT_WORK(&m->awdl_attach_work, mt_awdl_attach_work);
+		INIT_WORK(&m->awdl_teardown_work, mt_awdl_teardown_work);
+		INIT_DELAYED_WORK(&m->awdl_timeout, mt_awdl_timeout);
+	}
 	m->netdev = netdev;
 	ret = register_netdev(netdev);
 	if (ret) {
