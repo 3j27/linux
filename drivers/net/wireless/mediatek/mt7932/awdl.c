@@ -845,16 +845,16 @@ static int mt_vendor_awdl_cmd_handler(struct wiphy *wiphy, struct wireless_dev *
 			op == MT7932_VNDR_AWDL_OP_TEMPLATE ? 4 : 5;
 		u16 body_len;
 
-		if (len < (int)sizeof(*cmd) + 3) {
+		if (len < (int)sizeof(*cmd) + 2) {
 			err = -EINVAL;
 			break;
 		}
-		body_len = get_unaligned_le16(cmd->body + 1);
-		if (body_len != len - sizeof(*cmd) - 3) {
+		body_len = get_unaligned_le16(cmd->body);
+		if (body_len != len - sizeof(*cmd) - 2) {
 			err = -EINVAL;
 			break;
 		}
-		err = mt_awdl_data_cmd(m, selector, cmd->body + 3, body_len);
+		err = mt_awdl_data_cmd(m, selector, cmd->body + 2, body_len);
 		break;
 	}
 	case MT7932_VNDR_AWDL_OP_PEER_ADD:
