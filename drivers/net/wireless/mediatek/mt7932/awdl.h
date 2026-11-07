@@ -23,8 +23,11 @@
  * AWDL BSS as a little-endian 16-bit value in bytes 3-4; AWDL data frames
  * carry that entry in the receive descriptor.
  *
- * The firmware's AWDL session control family is the runtime command CID 0x7e,
- * whose body selects the operation in byte 0:
+ * The AWDL strings, together with a runtime-CID handler-registry entry at
+ * 0x7e, make runtime CID 0x7e a plausible session-control command. Its body
+ * ABI has NOT been confirmed. The operations below are the current probe
+ * hypothesis only; do not treat these layouts or state selectors as a
+ * firmware contract:
  *
  *   1 enable  {1, master 2 GHz channel, peer 5 GHz channel, slot density}
  *   2 disable {2}
