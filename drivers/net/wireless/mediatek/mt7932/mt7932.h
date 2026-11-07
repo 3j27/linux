@@ -319,8 +319,9 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 		      const void *payload, size_t length);
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length);
-int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool set,
-		   bool wait, const void *payload, size_t length);
+int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool runtime,
+		   bool set, bool wait, const void *payload, size_t length,
+		   int resp_eid);
 void mt_transport_snapshot(struct mt7932 *m);
 int mt_recovery_gate(struct mt7932 *m);
 int mt_cal_procedure(struct mt7932 *m, struct mt7932_cal_piece *pieces,

@@ -376,7 +376,7 @@ static int mt_submit(struct mt7932 *m, struct mt7932_ring *q, size_t length)
  */
 static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
 			  bool runtime, bool set, bool wait,
-			  const void *payload, size_t length)
+			  const void *payload, size_t length, int resp_eid)
 {
 	struct mt7932_ring *q = &m->tx[17];
 	unsigned long flags;
@@ -422,7 +422,8 @@ static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
 	reinit_completion(&m->response);
 	spin_lock_irqsave(&m->response_lock, flags);
 	m->waiting = wait ? m->seq : 0;
-	m->waiting_eid = uni ? 0x01 : mt7932_reply_eid(cid, runtime);
+	m->waiting_eid = resp_eid >= 0 ? resp_eid :
+			 (uni ? 0x01 : mt7932_reply_eid(cid, runtime));
 	m->reply_length = 0;
 	spin_unlock_irqrestore(&m->response_lock, flags);
 	ret = mt_submit(m, q, ret);
@@ -460,7 +461,7 @@ static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
 int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length)
 {
-	return mt_request_txd(m, cid, ext, false, runtime, set, wait, payload, length);
+	return mt_request_txd(m, cid, ext, false, runtime, set, wait, payload, length, -1);
 }
 
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
@@ -471,11 +472,15 @@ int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
 
 /* A runtime command from the AWDL control channel, in either descriptor
  * layout. The session commands and the probe path are the only callers.
+ * resp_eid overrides the event id the reply is matched against (-1 to
+ * derive it); the boot ROM's register read answers on its own event.
  */
-int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool set,
-		   bool wait, const void *payload, size_t length)
+int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool runtime,
+		   bool set, bool wait, const void *payload, size_t length,
+		   int resp_eid)
 {
-	return mt_request_txd(m, cid, ext, uni, true, set, wait, payload, length);
+	return mt_request_txd(m, cid, ext, uni, runtime, set, wait, payload,
+			      length, resp_eid);
 }
 
 static int mt_command(struct mt7932 *m, u8 cid, const void *payload, size_t length)

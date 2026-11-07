@@ -914,7 +914,8 @@ static int mt_vendor_raw_handler(struct wiphy *wiphy, struct wireless_dev *wdev,
 		return -EINVAL;
 	mutex_lock(&m->command_mutex);
 	err = mt_request_mcu(m, get_unaligned_le16(&cmd->cid), cmd->ext, cmd->uni,
-			     cmd->set, cmd->wait, cmd->body, body_len);
+			     cmd->runtime, cmd->set, cmd->wait, cmd->body, body_len,
+			     cmd->resp_eid ? (int)cmd->resp_eid : -1);
 	if (!err && cmd->wait && m->reply_length > 36)
 		err = mt_vendor_awdl_state_reply(wiphy, m->reply + 36,
 						 m->reply_length - 36);

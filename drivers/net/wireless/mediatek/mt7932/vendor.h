@@ -82,6 +82,14 @@ struct mt7932_vndr_awdl_cmd {
  * @ext: extension command id, original descriptor only
  * @set: 1 for SET, 0 for QUERY (the option byte's SET bit)
  * @wait: 1 to wait for the firmware reply and return its body
+ * @resp_eid: event id to match the reply against (0 to derive it from the
+ *	  command id, as the rest of the driver does; the boot ROM's register
+ *	  read answers with the access-register event, which has no
+ *	  derivation)
+ * @runtime: 1 to request the reply with the runtime command option (the
+ *	   firmware's own runtime command table answers those, if it has one
+ *	   for the id); 0 sends it like every driver command, which the
+ *	   firmware answers with the command-reply event
  * @length: body length
  * @body: the command body
  */
@@ -91,9 +99,11 @@ struct mt7932_vndr_raw_cmd {
 	__u8 ext;
 	__u8 set;
 	__u8 wait;
+	__u8 resp_eid;
+	__u8 runtime;
 	__le16 length;
 	__u8 body[];
-};
+} __packed;
 
 /**
  * enum mt7932_nlattrs - nl80211 message attributes
