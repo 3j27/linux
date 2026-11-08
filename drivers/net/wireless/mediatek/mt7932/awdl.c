@@ -75,6 +75,18 @@ int mt7932_awdl_wtbl = 2;
 module_param_named(awdl_wtbl, mt7932_awdl_wtbl, int, 0644);
 MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: unknown, refuse to transmit)");
 
+/* The own-MAC (OM) index the transmit descriptor names for AWDL frames. The
+ * station BSS owns index 0; the AWDL BSS is a second BSS with its own address,
+ * and the firmware attributes a frame, its keys and its address to a BSS by
+ * this index. Naming the station's index transmits AWDL frames under the
+ * station identity, which no AWDL peer accepts, and leaves frames addressed
+ * to the AWDL interface unclaimed on receive. The firmware assigns the index
+ * when the second BSS is activated; this is the value it uses for it.
+ */
+int mt7932_awdl_omac = 1;
+module_param_named(awdl_omac, mt7932_awdl_omac, int, 0644);
+MODULE_PARM_DESC(awdl_omac, "Own-MAC (OM) index of the AWDL BSS (station is 0)");
+
 #define MT7932_AWDL_IFNAME "awdl0"
 #define MT7932_AWDL_CREATE_TIMEOUT (5 * HZ)
 #define MT7932_AWDL_DESTROY_TIMEOUT (10 * HZ)
@@ -474,6 +486,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	struct mt7932_ring *q = &m->tx[0];
 	struct mt7932_desc *desc;
 	unsigned int tid = cfg80211_classify8021d(skb, NULL);
+	unsigned int own_mac = READ_ONCE(mt7932_awdl_omac);
 	u16 wtbl = READ_ONCE(m->awdl_wtbl);
 	u8 *payload, *header;
 	dma_addr_t dma;
@@ -531,7 +544,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	if (!ret)
 		ret = mt7932_data_header(header, payload, skb->len,
 					 m->data_payloads_dma + 4096 * slot,
-					 slot, wtbl, 0, tid, false);
+					 slot, wtbl, own_mac, tid, false);
 	if (ret) {
 		spin_unlock_irqrestore(&m->data_lock, flags);
 		goto drop;
