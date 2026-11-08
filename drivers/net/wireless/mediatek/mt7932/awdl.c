@@ -738,6 +738,12 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 	body[0] = MT7932_AWDL_BSS;
 	body[1] = active;
 	body[2] = MT7932_AWDL_OPMODE;
+	/* The vendor driver copies the current infrastructure primary channel
+	 * into the AWDL BSS description.  Leaving this zero creates the BSS but
+	 * gives the firmware no home channel from which to schedule its
+	 * availability windows, so it neither hears nor emits AWDL action frames.
+	 */
+	body[0x0a] = m->connect_channel;
 	body[0x2a] = 1;
 	body[0x30] = 0xfe;
 	body[0x32] = 0x4b;
