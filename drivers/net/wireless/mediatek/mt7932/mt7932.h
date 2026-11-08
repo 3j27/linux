@@ -382,6 +382,7 @@ int mt_power_init(struct mt7932 *m);
  */
 extern const struct net_device_ops mt_awdl_net_ops;
 extern int mt7932_awdl_trace;
+extern int mt7932_awdl_wtbl;
 bool mt7932_awdl_enabled(void);
 extern const struct wiphy_vendor_command mt7932_vendor_cmds[3];
 bool mt_awdl_tx_allowed(const struct mt7932 *m);

@@ -241,32 +241,29 @@ void mt_data_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 	/* Serialize peer identity and accounting with association retirement. */
 	spin_lock_irqsave(&m->response_lock, flags);
 	/* AWDL frames ride TX0/RX with the AWDL BSS's own WTBL entry; the
-	 * station gate below would drop them. Data-gate fields are owned by
-	 * data_lock and read here without it, single-word and harmless when
-	 * one pass stale.
+	 * station gate below would drop them. The entry is what a presence
+	 * event reported or what the module parameter asks for; where no
+	 * entry is known, a frame carrying the AWDL data envelope is the
+	 * AWDL BSS's. Data-gate fields are owned by data_lock and read here
+	 * without it, single-word and harmless when one pass stale.
 	 */
 	if (IS_ENABLED(CONFIG_MT7932_AWDL) && READ_ONCE(m->awdl_registered) &&
-	    READ_ONCE(m->awdl_present) && READ_ONCE(m->awdl_wtbl) &&
-	    frame->wtbl == READ_ONCE(m->awdl_wtbl)) {
-		mt_awdl_receive(m, frame);
-		goto unlock;
+	    READ_ONCE(m->awdl_present)) {
+		u16 wtbl = READ_ONCE(m->awdl_wtbl);
+
+		if (!wtbl && mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0xff)
+			wtbl = mt7932_awdl_wtbl;
+		if ((wtbl && frame->wtbl == wtbl) ||
+		    mt7932_awdl_payload(frame->data, frame->length)) {
+			mt_awdl_receive(m, frame);
+			goto unlock;
+		}
 	}
 	if (!m->connected || !m->peer_valid || m->disconnecting || m->stopping)
 		goto unlock;
 	if ((frame->unicast && frame->wtbl != m->peer_wtbl) ||
 	    (!frame->unicast && frame->wtbl != m->peer_ids.wtbl[0] &&
 	     frame->wtbl != m->peer_wtbl)) {
-		/* With no WTBL entry reported for the AWDL BSS, a frame the
-		 * station cannot claim belongs to it if it carries the AWDL
-		 * envelope; anything else is counted as it was.
-		 */
-		if (IS_ENABLED(CONFIG_MT7932_AWDL) &&
-		    READ_ONCE(m->awdl_registered) &&
-		    READ_ONCE(m->awdl_present) && !READ_ONCE(m->awdl_wtbl) &&
-		    mt7932_awdl_payload(frame->data, frame->length)) {
-			mt_awdl_receive(m, frame);
-			goto unlock;
-		}
 		m->rx_wrong_peer++;
 		m->netdev->stats.rx_dropped++;
 		goto unlock;

@@ -60,17 +60,20 @@ int mt7932_awdl_trace;
 module_param_named(awdl_trace, mt7932_awdl_trace, int, 0644);
 MODULE_PARM_DESC(awdl_trace, "Log AWDL tx completions");
 
-/* The WTBL entry to ask for when the AWDL BSS is activated. The vendor
- * driver asks its security layer for a broadcast entry and passes what it
- * gets, which is an index this driver cannot know before the activation.
- * The first broadcast entry is the one the firmware has for a BSS that
- * nothing else has claimed, so that is what is asked for; 255 asks the
- * firmware to choose. The presence event reports the entry that was
- * assigned, so this only has to be guessed until that event has been seen.
+/* The WTBL entry of the AWDL BSS: sent in the activation and the BSS
+ * description, written into the header of every frame the interface
+ * transmits, and matched against received frames. The vendor driver asks
+ * its security layer for a broadcast entry and passes what it gets; this
+ * firmware reports no presence event, so the entry is never learned and
+ * this is the only thing that can say it. The station's association takes
+ * the station, broadcast and peer entries (seen as 1, 3 and 4), and the
+ * AWDL BSS has an entry of its own in between: 2. Zero means unknown, and
+ * with it the interface refuses to transmit rather than describe frames
+ * with an entry the firmware may hand to another BSS.
  */
-static int mt7932_awdl_wtbl;
+int mt7932_awdl_wtbl = 2;
 module_param_named(awdl_wtbl, mt7932_awdl_wtbl, int, 0644);
-MODULE_PARM_DESC(awdl_wtbl, "WTBL entry to request for the AWDL BSS (255: firmware chooses)");
+MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: unknown, refuse to transmit)");
 
 #define MT7932_AWDL_IFNAME "awdl0"
 #define MT7932_AWDL_CREATE_TIMEOUT (5 * HZ)
@@ -426,8 +429,11 @@ int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
 		spin_unlock_irqrestore(&m->response_lock, flags);
 		return ret;
 	}
-	queue_delayed_work(system_long_wq, &m->awdl_timeout,
-			   MT7932_AWDL_DESTROY_TIMEOUT);
+	/* Nothing reports the absence either: take the interface away as
+	 * soon as the BSS is deactivated, the same way creation publishes
+	 * it as soon as the BSS is activated.
+	 */
+	queue_work(system_long_wq, &m->awdl_teardown_work);
 	return 0;
 }
 
@@ -475,6 +481,11 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	unsigned int slot;
 	int ret;
 
+	/* The entry comes from a presence event when the firmware ever
+	 * reports one; until then it is what the module parameter says.
+	 */
+	if (!wtbl && mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0xff)
+		wtbl = mt7932_awdl_wtbl;
 	if (!netif_running(netdev) || !netif_device_present(netdev) ||
 	    !READ_ONCE(m->awdl_registered) || !READ_ONCE(m->awdl_present) ||
 	    !READ_ONCE(m->awdl_enabled) || !mt_awdl_rf_ready(m) ||
@@ -520,7 +531,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	if (!ret)
 		ret = mt7932_data_header(header, payload, skb->len,
 					 m->data_payloads_dma + 4096 * slot,
-					 slot, m->awdl_wtbl, 0, tid, false);
+					 slot, wtbl, 0, tid, false);
 	if (ret) {
 		spin_unlock_irqrestore(&m->data_lock, flags);
 		goto drop;
