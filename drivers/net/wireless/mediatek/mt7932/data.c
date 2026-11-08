@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "mt7932.h"
+#include "awdl.h"
 
 static bool mt_bss_tx_allowed(struct mt7932 *m);
 static void mt_bss_tx_account(struct mt7932 *m);
@@ -255,6 +256,17 @@ void mt_data_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 	if ((frame->unicast && frame->wtbl != m->peer_wtbl) ||
 	    (!frame->unicast && frame->wtbl != m->peer_ids.wtbl[0] &&
 	     frame->wtbl != m->peer_wtbl)) {
+		/* With no WTBL entry reported for the AWDL BSS, a frame the
+		 * station cannot claim belongs to it if it carries the AWDL
+		 * envelope; anything else is counted as it was.
+		 */
+		if (IS_ENABLED(CONFIG_MT7932_AWDL) &&
+		    READ_ONCE(m->awdl_registered) &&
+		    READ_ONCE(m->awdl_present) && !READ_ONCE(m->awdl_wtbl) &&
+		    mt7932_awdl_payload(frame->data, frame->length)) {
+			mt_awdl_receive(m, frame);
+			goto unlock;
+		}
 		m->rx_wrong_peer++;
 		m->netdev->stats.rx_dropped++;
 		goto unlock;

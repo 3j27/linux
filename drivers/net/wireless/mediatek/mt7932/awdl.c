@@ -347,8 +347,14 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	spin_unlock_irqrestore(&m->response_lock, flags);
 	spin_lock_irqsave(&m->data_lock, flags);
 	m->awdl_registered = false;
-	m->awdl_present = false;
-	m->awdl_absent = true;
+	/* This firmware reports no BSS presence, associated or not: EID 0x11
+	 * has never been seen on it. So the BSS is taken as present as soon
+	 * as it has been activated and its WTBL entry as unknown, which the
+	 * receive path reads as "whatever the station does not claim". A
+	 * presence event, if one ever arrives, replaces both.
+	 */
+	m->awdl_present = true;
+	m->awdl_absent = false;
 	m->awdl_quota = 0;
 	m->awdl_wtbl = 0;
 	m->awdl_tx_seq = 0;
@@ -373,6 +379,13 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 		 */
 		dev_err(&m->pdev->dev, "AWDL_CREATE_FAILED: %d\n", ret);
 		queue_delayed_work(system_long_wq, &m->awdl_timeout, 0);
+	} else {
+		/* Nothing waits for the firmware here: the BSS is activated,
+		 * so publish the interface. The transmit completions the
+		 * firmware gives for its frames are the only report this
+		 * BSS ever gets, and they need the netdev to exist.
+		 */
+		queue_work(system_long_wq, &m->awdl_attach_work);
 	}
 	return ret;
 }

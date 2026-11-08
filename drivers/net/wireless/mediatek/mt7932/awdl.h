@@ -135,6 +135,18 @@ static inline void mt7932_awdl_decap(struct sk_buff *skb)
 	skb_pull(skb, MT7932_AWDL_ENCAP_LEN);
 }
 
+/* Whether a received payload carries the AWDL data envelope. The skb form
+ * below is what the receive path tests once the frame has been copied.
+ */
+static inline bool mt7932_awdl_payload(const void *data, size_t length)
+{
+	const u8 *p = data;
+
+	return length >= MT7932_AWDL_DATA_MIN_LEN &&
+	       ntohs(get_unaligned_be16(p + 2 * ETH_ALEN)) <= ETH_DATA_LEN &&
+	       !memcmp(p + ETH_HLEN, mt7932_awdl_snap, sizeof(mt7932_awdl_snap));
+}
+
 /* Whether a received translated frame carries the AWDL data envelope. */
 static inline bool mt7932_awdl_frame(const struct sk_buff *skb)
 {
