@@ -739,7 +739,13 @@ static int mt_awdl_tlv_cmd(struct mt7932 *m, u32 type, const void *payload,
 	body = kvmalloc(total, GFP_KERNEL);
 	if (!body)
 		return -ENOMEM;
-	put_unaligned_le16(1, body);
+	/* The firmware's dispatcher validates this word against the element
+	 * payload length: sending 1 here made every session command but the
+	 * one whose payload happens to be one byte fail with "Body length
+	 * mismatch (expected N, got 1)". The enable only ever took effect
+	 * when the length was sent explicitly.
+	 */
+	put_unaligned_le16(length, body);
 	put_unaligned_le16(0, body + 2);
 	put_unaligned_le32(type, body + 4);
 	put_unaligned_le32(length, body + 8);
