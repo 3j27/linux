@@ -805,6 +805,73 @@ int mt_awdl_set_bssid(struct mt7932 *m, const u8 *mac)
 			       sizeof(payload));
 }
 
+/* command_mutex held. The channel list, CID 0xf7 element type 2. The
+ * firmware hops the availability windows over this list: without it the
+ * session is enabled but never goes on air, and discovery never starts.
+ * The vendor driver sends the word that is always 1, the master preference
+ * its BSS holds (4 by default), the count, then the channel numbers and,
+ * in the same order, each channel's operating class. The classes come from
+ * the driver's operating-class table: 81 covers a 2 GHz channel at 20 MHz,
+ * 128 a 5 GHz channel at its 80 MHz bandwidth whatever the primary channel
+ * inside the block.
+ */
+int mt_awdl_channel_list(struct mt7932 *m)
+{
+	static const struct {
+		u8 first, last;
+	} blocks5g[] = {
+		{ 36, 48 }, { 52, 64 }, { 100, 112 }, { 116, 128 },
+		{ 132, 144 }, { 149, 161 }, { 165, 177 },
+	};
+	u8 body[MT7932_AWDL_CHANNEL_BODY] = {};
+	unsigned int count = 0;
+	unsigned int i, j;
+	int ret;
+
+	if (!mt_awdl_rf_ready(m))
+		return -ENODEV;
+
+	for (i = 0; i < NUM_NL80211_BANDS && count < MT7932_AWDL_CHANNELS_MAX; i++) {
+		struct ieee80211_supported_band *sband = m->wiphy->bands[i];
+
+		if (!sband || (i != NL80211_BAND_2GHZ && i != NL80211_BAND_5GHZ))
+			continue;
+		for (j = 0; j < sband->n_channels && count < MT7932_AWDL_CHANNELS_MAX; j++) {
+			struct ieee80211_channel *ch = &sband->channels[j];
+			u8 class = 0;
+			unsigned int k;
+
+			if (ch->flags & IEEE80211_CHAN_DISABLED)
+				continue;
+			if (i == NL80211_BAND_2GHZ) {
+				class = MT7932_AWDL_CLASS_2G;
+			} else {
+				for (k = 0; k < ARRAY_SIZE(blocks5g); k++)
+					if (ch->hw_value >= blocks5g[k].first &&
+					    ch->hw_value <= blocks5g[k].last) {
+						class = MT7932_AWDL_CLASS_5G;
+						break;
+					}
+			}
+			if (!class)
+				continue;
+			body[6 + count] = ch->hw_value;
+			body[6 + MT7932_AWDL_CHANNELS_MAX + count] = class;
+			count++;
+		}
+	}
+	if (!count)
+		return -EINVAL;
+
+	put_unaligned_le32(1, body);
+	body[4] = 4;
+	body[5] = count;
+	ret = mt_awdl_tlv_cmd(m, MT7932_AWDL_TLV_CHANNELS, body, sizeof(body));
+	if (!ret)
+		dev_info(&m->pdev->dev, "AWDL channel list: %u channels\n", count);
+	return ret;
+}
+
 /* command_mutex held. The session operations that are left have no payload
  * this driver has read: the vendor driver's channel list (type 2, 0x86
  * bytes), sync master (9), PSF period (3), election parameters (0xa) and
@@ -930,6 +997,12 @@ static int mt_vendor_awdl_cmd_handler(struct wiphy *wiphy, struct wireless_dev *
 		break;
 	case MT7932_VNDR_AWDL_OP_DISABLE:
 		err = mt_awdl_session(m, false);
+		break;
+	case MT7932_VNDR_AWDL_OP_CHANNELS:
+		if (len != (int)sizeof(*cmd))
+			err = -EINVAL;
+		else
+			err = mt_awdl_channel_list(m);
 		break;
 	case MT7932_VNDR_AWDL_OP_SERVICE:
 	case MT7932_VNDR_AWDL_OP_TEMPLATE:

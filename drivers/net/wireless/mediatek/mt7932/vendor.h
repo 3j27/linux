@@ -60,6 +60,7 @@ enum mt7932_vndr_awdl_cmd_op {
 	MT7932_VNDR_AWDL_OP_STATE,
 	MT7932_VNDR_AWDL_OP_ELECTION,
 	MT7932_VNDR_AWDL_OP_BSSID,
+	MT7932_VNDR_AWDL_OP_CHANNELS,
 	MT7932_VNDR_AWDL_OP_LAST
 };
 
@@ -68,9 +69,11 @@ enum mt7932_vndr_awdl_cmd_op {
  *
  * @op: one of enum mt7932_vndr_awdl_cmd_op (little-endian u32)
  * @body: the operation-specific payload, after the element header the
- *	  driver builds; enable and disable carry nothing, the BSSID carries
- *	  its six address bytes, and the operations that are not implemented
- *	  are refused whatever they carry.
+ *	  driver builds; enable, disable and channels carry nothing (the
+ *	  channel list the driver builds from the wiphy's permitted
+ *	  channels), the BSSID carries its six address bytes, and the
+ *	  operations that are not implemented are refused whatever they
+ *	  carry.
  */
 struct mt7932_vndr_awdl_cmd {
 	__le32 op;

@@ -226,8 +226,16 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		m->reply_length = event.length;
 		complete(&m->response);
 	} else {
-		dev_dbg_ratelimited(&m->pdev->dev, "event eid=%02x seq=%u option=%02x len=%zu\n",
-				     event.eid, event.seq, event.option, event.length);
+		/* The body goes out with the line: the events that answer no
+		 * command are the firmware's own reports, and on this
+		 * firmware they are the only unsolicited words it says; a
+		 * periodic event nobody has decoded is worth a body.
+		 */
+		dev_dbg_ratelimited(&m->pdev->dev,
+				    "event eid=%02x seq=%u option=%02x len=%zu body %*ph\n",
+				    event.eid, event.seq, event.option, event.length,
+				    (int)min_t(size_t, event.length, 48),
+				    (const u8 *)event.packet + 36);
 	}
 unlock:
 	spin_unlock_irqrestore(&m->response_lock, flags);

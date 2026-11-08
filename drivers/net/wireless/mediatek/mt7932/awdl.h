@@ -35,7 +35,7 @@
  * so the driver never waits for one:
  *
  *   0x00 bssid          { __le32 1, mac[6] }
- *   0x02 channel list   { 0x86 bytes }
+ *   0x02 channel list   { __le32 1, u8 pref, u8 count, u8 ch[64], u8 class[64] }
  *   0x03 psf period     { 8 bytes }
  *   0x06 oob auto       { 0xc bytes }
  *   0x07 edge rssi      { 5 bytes }
@@ -70,7 +70,20 @@
 
 /* Runtime CID 0xf7 element types (see the table above). */
 #define MT7932_AWDL_TLV_BSSID 0x00
+#define MT7932_AWDL_TLV_CHANNELS 0x02
 #define MT7932_AWDL_TLV_ENABLE 0x08
+
+/* CID 0xf7 type 2: the channel sequence the availability windows hop over,
+ * { __le32 1, u8 master preference, u8 count, u8 channel[64],
+ *   u8 operating class[64] }. The classes are the driver's operating-class
+ * table read out of the vendor driver's binary: 81 is 2 GHz at 20 MHz, 128
+ * is 5 GHz at 80 MHz, and a channel's class is named by its bandwidth's
+ * center channel (36-48 at 42, 149-161 at 155, and so on).
+ */
+#define MT7932_AWDL_CHANNELS_MAX 64
+#define MT7932_AWDL_CHANNEL_BODY (4 + 2 + 2 * MT7932_AWDL_CHANNELS_MAX)
+#define MT7932_AWDL_CLASS_2G 81
+#define MT7932_AWDL_CLASS_5G 128
 
 /* An 0xf7 body is a four-byte header plus type and length per element. */
 #define MT7932_AWDL_TLV_HDR 8
