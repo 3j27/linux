@@ -41,8 +41,13 @@ enum mt7932_vndr_awdl_op {
 
 /**
  * enum mt7932_vndr_awdl_cmd_op - operations for MT7932_VNDR_CMDS_AWDL_CMD,
- *				  mapping one-to-one onto the firmware's
- *				  CID 0x7e body selectors (see awdl.h)
+ *				  one per element of the firmware's AWDL
+ *				  session multiplexer (runtime CID 0xf7,
+ *				  see awdl.h)
+ *
+ * The operations past @MT7932_VNDR_AWDL_OP_BSSID have no payload this
+ * driver has read out of the vendor firmware's counterpart; they answer
+ * -EOPNOTSUPP rather than send a body nobody has confirmed.
  */
 enum mt7932_vndr_awdl_cmd_op {
 	MT7932_VNDR_AWDL_OP_ENABLE,
@@ -54,6 +59,7 @@ enum mt7932_vndr_awdl_cmd_op {
 	MT7932_VNDR_AWDL_OP_PEER_REMOVE,
 	MT7932_VNDR_AWDL_OP_STATE,
 	MT7932_VNDR_AWDL_OP_ELECTION,
+	MT7932_VNDR_AWDL_OP_BSSID,
 	MT7932_VNDR_AWDL_OP_LAST
 };
 
@@ -61,12 +67,10 @@ enum mt7932_vndr_awdl_cmd_op {
  * struct mt7932_vndr_awdl_cmd - one AWDL session command
  *
  * @op: one of enum mt7932_vndr_awdl_cmd_op (little-endian u32)
- * @body: the operation-specific CID 0x7e body, after its selector byte;
- *	  enable carries {channel, channel, density}, disable nothing,
- *	  service/template/action carry a little-endian u16 length then
- *	  that many bytes, peers carry the six MAC bytes, state carries one
- *	  selector byte and election a little-endian u32 metric and a
- *	  signed 8-bit RSSI threshold.
+ * @body: the operation-specific payload, after the element header the
+ *	  driver builds; enable and disable carry nothing, the BSSID carries
+ *	  its six address bytes, and the operations that are not implemented
+ *	  are refused whatever they carry.
  */
 struct mt7932_vndr_awdl_cmd {
 	__le32 op;

@@ -252,6 +252,7 @@ struct mt7932 {
 	u64 awdl_tx_bytes;
 	u32 awdl_tx_packets;
 	char awdl_ifname[IFNAMSIZ];
+	u8 awdl_mac[ETH_ALEN];
 	struct net_device *awdl_netdev;
 	struct wireless_dev *awdl_wdev;
 	struct work_struct awdl_attach_work, awdl_teardown_work;
@@ -386,8 +387,8 @@ extern const struct wiphy_vendor_command mt7932_vendor_cmds[3];
 bool mt_awdl_tx_allowed(const struct mt7932 *m);
 int mt_awdl_add_vif(struct wiphy *wiphy, const char *name);
 int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev);
-int mt_awdl_session(struct mt7932 *m, bool enable, u8 master_chan, u8 peer_chan,
-		    u8 density);
+int mt_awdl_session(struct mt7932 *m, bool enable);
+int mt_awdl_set_bssid(struct mt7932 *m, const u8 *mac);
 int mt_awdl_data_cmd(struct mt7932 *m, u8 selector, const void *data, size_t length);
 int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN]);
 int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length);

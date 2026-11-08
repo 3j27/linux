@@ -60,9 +60,28 @@ int mt7932_awdl_trace;
 module_param_named(awdl_trace, mt7932_awdl_trace, int, 0644);
 MODULE_PARM_DESC(awdl_trace, "Log AWDL tx completions");
 
+/* The WTBL entry to ask for when the AWDL BSS is activated. The vendor
+ * driver asks its security layer for a broadcast entry and passes what it
+ * gets, which is an index this driver cannot know before the activation.
+ * The first broadcast entry is the one the firmware has for a BSS that
+ * nothing else has claimed, so that is what is asked for; 255 asks the
+ * firmware to choose. The presence event reports the entry that was
+ * assigned, so this only has to be guessed until that event has been seen.
+ */
+static int mt7932_awdl_wtbl;
+module_param_named(awdl_wtbl, mt7932_awdl_wtbl, int, 0644);
+MODULE_PARM_DESC(awdl_wtbl, "WTBL entry to request for the AWDL BSS (255: firmware chooses)");
+
 #define MT7932_AWDL_IFNAME "awdl0"
 #define MT7932_AWDL_CREATE_TIMEOUT (5 * HZ)
 #define MT7932_AWDL_DESTROY_TIMEOUT (10 * HZ)
+
+/* The two BSS commands, defined with the session controls below and used by
+ * the interface paths that come first.
+ */
+static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl);
+static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
+				u8 wtbl);
 
 static bool mt_awdl_rf_ready(const struct mt7932 *m)
 {
@@ -270,12 +289,19 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	struct mt7932 *m = mt_from_wiphy(wiphy);
 	struct net_device *netdev;
 	struct wireless_dev *wdev;
-	u8 body[12] = { MT7932_AWDL_BSS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 1 };
+	u8 mac[ETH_ALEN];
 	unsigned long flags;
 	int ret;
 
 	if (!mt_awdl_rf_ready(m))
 		return -ENODEV;
+
+	/* The BSS and the netdev share one address: the station's with the
+	 * local bit set, which is how a peer tells the AWDL interface from
+	 * the infrastructure one.
+	 */
+	ether_addr_copy(mac, m->mac);
+	mac[0] |= 0x02;
 
 	wdev = kzalloc(sizeof(*wdev), GFP_KERNEL);
 	netdev = wdev ? alloc_etherdev(sizeof(m)) : NULL;
@@ -296,10 +322,9 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	netdev->min_mtu = ETH_MIN_MTU;
 	netdev->max_mtu = ETH_DATA_LEN - MT7932_AWDL_ENCAP_LEN;
 	SET_NETDEV_DEV(netdev, wiphy_dev(wiphy));
-	eth_hw_addr_set(netdev, m->mac);
+	eth_hw_addr_set(netdev, mac);
 	strscpy(netdev->name, MT7932_AWDL_IFNAME, IFNAMSIZ);
 	netif_carrier_off(netdev);
-	memcpy(body + 4, m->mac, ETH_ALEN);
 
 	mutex_lock(&m->command_mutex);
 	spin_lock_irqsave(&m->response_lock, flags);
@@ -313,6 +338,7 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	}
 	m->awdl_netdev = netdev;
 	m->awdl_wdev = wdev;
+	ether_addr_copy(m->awdl_mac, mac);
 	strscpy(m->awdl_ifname, name, sizeof(m->awdl_ifname));
 	WRITE_ONCE(m->awdl_active, true);
 	WRITE_ONCE(m->awdl_destroying, false);
@@ -331,7 +357,15 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	queue_delayed_work(system_long_wq, &m->awdl_timeout,
 			   MT7932_AWDL_CREATE_TIMEOUT);
 
-	ret = mt_request(m, 0x11, true, true, false, body, sizeof(body));
+	/* The vendor driver's order: describe the BSS while it is still
+	 * inactive, activate it, then describe it again as active. None of
+	 * the three is answered; the presence event is the report.
+	 */
+	ret = mt_awdl_bss_info(m, false, 0xff);
+	if (!ret)
+		ret = mt_awdl_bss_activate(m, true, mac, mt7932_awdl_wtbl);
+	if (!ret)
+		ret = mt_awdl_bss_info(m, true, mt7932_awdl_wtbl);
 	mutex_unlock(&m->command_mutex);
 	if (ret) {
 		/* A present event may already be in flight; retire through
@@ -350,7 +384,6 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
 {
 	struct mt7932 *m = mt_from_wiphy(wiphy);
-	u8 body[12] = { MT7932_AWDL_BSS, 0 };
 	unsigned long flags;
 	int ret;
 
@@ -371,7 +404,7 @@ int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
 	spin_unlock_irqrestore(&m->response_lock, flags);
 
 	mutex_lock(&m->command_mutex);
-	ret = mt_request(m, 0x11, true, true, false, body, sizeof(body));
+	ret = mt_awdl_bss_activate(m, false, m->awdl_mac, mt7932_awdl_wtbl);
 	mutex_unlock(&m->command_mutex);
 	if (ret) {
 		spin_lock_irqsave(&m->response_lock, flags);
@@ -409,7 +442,7 @@ static int mt_awdl_net_stop(struct net_device *netdev)
 	 */
 	if (READ_ONCE(m->awdl_registered) && READ_ONCE(m->awdl_enabled)) {
 		mutex_lock(&m->command_mutex);
-		mt_awdl_session(m, false, 0, 0, 0);
+		mt_awdl_session(m, false);
 		mutex_unlock(&m->command_mutex);
 	}
 	return 0;
@@ -550,19 +583,26 @@ static int mt_awdl_set_mac_address(struct net_device *netdev, void *address)
 	ret = eth_mac_addr(netdev, address);
 	if (!ret) {
 		/* Reprogram the AWDL BSS identity: deactivate it, then
-		 * reactivate with the new address. The absence and presence
-		 * events that answer re-derive the WTBL entry.
+		 * reactivate with the new address, and tell the session the
+		 * BSSID moved with it. The absence and presence events that
+		 * answer re-derive the WTBL entry.
 		 */
-		u8 off[12] = { MT7932_AWDL_BSS, 0 };
-		u8 on[12] = { MT7932_AWDL_BSS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 1 };
+		u8 mac[ETH_ALEN];
 
-		memcpy(on + 4, sa->sa_data, ETH_ALEN);
-		ret = mt_request(m, 0x11, true, true, false, off, sizeof(off));
+		ether_addr_copy(mac, sa->sa_data);
+		ether_addr_copy(m->awdl_mac, mac);
+		ret = mt_awdl_bss_activate(m, false, mac, mt7932_awdl_wtbl);
 		if (!ret) {
 			spin_lock_irqsave(&m->response_lock, flags);
 			WRITE_ONCE(m->awdl_active, true);
 			spin_unlock_irqrestore(&m->response_lock, flags);
-			ret = mt_request(m, 0x11, true, true, false, on, sizeof(on));
+			ret = mt_awdl_bss_activate(m, true, mac,
+						  mt7932_awdl_wtbl);
+			if (!ret)
+				ret = mt_awdl_bss_info(m, true,
+						       mt7932_awdl_wtbl);
+			if (!ret)
+				ret = mt_awdl_set_bssid(m, mac);
 			if (ret) {
 				spin_lock_irqsave(&m->response_lock, flags);
 				WRITE_ONCE(m->awdl_active, false);
@@ -626,123 +666,147 @@ void mt_awdl_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 
 /* --- firmware session control ------------------------------------------ */
 
-/* command_mutex held. Enable or disable the firmware's AWDL session. The
- * master availability window is a 2 GHz channel and the peer window a 5 GHz
- * one, both country-permitted; the firmware derives its slot density from
- * the bandwidth-availability map for the selected density.
+/* command_mutex held. One element of the firmware's AWDL multiplexer,
+ * runtime CID 0xf7: a four-byte header, then a little-endian type, a
+ * little-endian length and that many bytes. Every AWDL set goes out the way
+ * the vendor driver sends it, with the response bit clear, so this returns
+ * once the command is on the ring; the firmware's answer is the empty
+ * command reply, which carries nothing to check.
  */
-int mt_awdl_session(struct mt7932 *m, bool enable, u8 master_chan, u8 peer_chan,
-		    u8 density)
+static int mt_awdl_tlv_cmd(struct mt7932 *m, u32 type, const void *payload,
+			   size_t length)
 {
-	u8 body[4] = { enable ? 1 : 2, master_chan, peer_chan, density };
-	struct ieee80211_channel *ch;
+	size_t total = MT7932_AWDL_TLV_OVERHEAD + length;
+	u8 *body;
 	int ret;
 
 	if (!mt_awdl_rf_ready(m))
 		return -ENODEV;
-	if (enable) {
-		if (!mt7932_channel_band(NL80211_BAND_2GHZ, master_chan) ||
-		    !mt7932_channel_band(NL80211_BAND_5GHZ, peer_chan) ||
-		    density > MT7932_AWDL_DENSITY_MIRROR)
-			return -EINVAL;
-		ch = ieee80211_get_channel(m->wiphy,
-			ieee80211_channel_to_frequency(master_chan, NL80211_BAND_2GHZ));
-		if (!ch || (ch->flags & IEEE80211_CHAN_DISABLED))
-			return -EINVAL;
-		ch = ieee80211_get_channel(m->wiphy,
-			ieee80211_channel_to_frequency(peer_chan, NL80211_BAND_5GHZ));
-		if (!ch || (ch->flags & IEEE80211_CHAN_DISABLED))
-			return -EINVAL;
-	}
-	ret = mt_request(m, 0x7e, true, true, true, body, sizeof(body));
-	if (ret)
-		return ret;
-	WRITE_ONCE(m->awdl_enabled, enable);
-	dev_info(&m->pdev->dev, "AWDL session %s: master=%u peer=%u density=%u\n",
-		 enable ? "enabled" : "disabled", master_chan, peer_chan, density);
-	return 0;
-}
-
-/* command_mutex held. The length-prefixed SETs (service record, PSF
- * template, action frame) share one body layout: selector, u16 length,
- * then that many bytes. The firmware refuses these while the session is
- * disabled; the driver refuses them the same way rather than submitting
- * commands the firmware would answer with an error.
- */
-int mt_awdl_data_cmd(struct mt7932 *m, u8 selector, const void *data, size_t length)
-{
-	size_t offset = 3;
-	u8 *body;
-	int ret;
-
-	if (!mt_awdl_rf_ready(m) || !READ_ONCE(m->awdl_enabled))
-		return -EROFS;
-	if (selector != 3 && selector != 4 && selector != 5)
+	if (length > MT7932_AWDL_BODY_MAX - MT7932_AWDL_TLV_OVERHEAD)
 		return -EINVAL;
-	if (!length || length > MT7932_AWDL_BODY_MAX - offset)
-		return -EINVAL;
-	body = kvmalloc(offset + length, GFP_KERNEL);
+
+	body = kvmalloc(total, GFP_KERNEL);
 	if (!body)
 		return -ENOMEM;
-	body[0] = selector;
-	put_unaligned_le16(length, body + 1);
-	memcpy(body + offset, data, length);
-	ret = mt_request(m, 0x7e, true, true, true, body, offset + length);
+	put_unaligned_le16(1, body);
+	put_unaligned_le16(0, body + 2);
+	put_unaligned_le32(type, body + 4);
+	put_unaligned_le32(length, body + 8);
+	memcpy(body + MT7932_AWDL_TLV_HDR, payload, length);
+	ret = mt_request(m, 0xf7, true, true, false, body, total);
 	kvfree(body);
 	return ret;
 }
 
-/* command_mutex held. One peer table entry, added or removed. The firmware
- * tracks at most eight peers; a peer without an entry silently loses every
- * frame sent to it, which is why the window supervisor evicts and re-adds.
+/* command_mutex held. CID 0x12, the description the firmware keeps for one
+ * BSS. The firmware takes the BSS index, the active byte, the operation mode
+ * and the service-set length from the first four bytes and the channel from
+ * offset 0xa, and keeps the rest as the BSS's own description. The bytes
+ * below are what the vendor driver's AWDL BSS carries, including the fields
+ * it overwrites after the copy: the type-5 marker, the rate set, the WTBL
+ * entry (still -1 until the firmware assigns one, which is how the first of
+ * the two updates differs from the second) and the two availability maps.
  */
-int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN])
+static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 {
-	u8 body[7] = { add ? 6 : 7 };
+	u8 body[MT7932_AWDL_BSSINFO_LEN] = {};
 
-	if (!mt_awdl_rf_ready(m) || !READ_ONCE(m->awdl_enabled))
-		return -EROFS;
-	if (mac[0] & 1)
-		return -EINVAL; /* a group address names no peer */
-	memcpy(body + 1, mac, ETH_ALEN);
-	return mt_request(m, 0x7e, true, true, true, body, sizeof(body));
+	body[0] = MT7932_AWDL_BSS;
+	body[1] = active;
+	body[2] = MT7932_AWDL_OPMODE;
+	body[0x2a] = 1;
+	body[0x30] = 0xfe;
+	body[0x32] = 0x4b;
+	body[0x3a] = wtbl;
+	body[0x5a] = 4;
+	body[0x60] = 0xf0;
+	body[0x61] = 0x3f;
+
+	return mt_request(m, 0x12, true, true, false, body, sizeof(body));
 }
 
-/* command_mutex held. One firmware state readback; the reply is the event
- * body. Selectors: 0 advertisers, 1 statistics, 2 opmode, 3 channel
- * sequence, 4 sync parameters.
+/* command_mutex held. CID 0x11 activates a BSS: its index, the active byte,
+ * the net type (5 is AWDL), the BSS's reuse index, its address, the WTBL
+ * entry its broadcast frames use, and a byte the vendor driver always sends
+ * as 1. Deactivation is the same length with the active byte clear. Neither
+ * waits: the presence event is the only report either one gets.
  */
-int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length)
+static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
+				u8 wtbl)
 {
-	u8 body[2] = { 8, selector };
+	u8 body[12] = { MT7932_AWDL_BSS, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
+
+	body[1] = active;
+	body[10] = wtbl;
+	memcpy(body + 4, mac, ETH_ALEN);
+
+	return mt_request(m, 0x11, true, true, false, body, sizeof(body));
+}
+
+/* command_mutex held. Turn the firmware's AWDL session on or off: element
+ * type 8, a word that is always 1 and the on/off flag. Channel selection is
+ * a different element and the driver does not build it yet, so this brings
+ * the session up on whatever availability map the firmware last held.
+ */
+int mt_awdl_session(struct mt7932 *m, bool enable)
+{
+	u8 payload[6];
 	int ret;
 
-	if (!mt_awdl_rf_ready(m) || !READ_ONCE(m->awdl_enabled))
-		return -EROFS;
-	if (selector > 4)
-		return -EINVAL;
-	ret = mt_request(m, 0x7e, true, true, true, body, sizeof(body));
+	put_unaligned_le32(1, payload);
+	put_unaligned_le16(enable ? 1 : 0, payload + 4);
+	ret = mt_awdl_tlv_cmd(m, MT7932_AWDL_TLV_ENABLE, payload,
+			      sizeof(payload));
 	if (ret)
 		return ret;
-	if (m->reply_length < 37)
-		return -EPROTO;
-	*reply = m->reply + 36;
-	*length = m->reply_length - 36;
+
+	WRITE_ONCE(m->awdl_enabled, enable);
+	dev_info(&m->pdev->dev, "AWDL session %s\n",
+		 enable ? "enabled" : "disabled");
 	return 0;
 }
 
-/* command_mutex held. Election configuration: the metric this machine
- * advertises and the RSSI floor for adopting a peer as root.
+/* command_mutex held. The AWDL BSSID, element type 0: a word that is always
+ * 1 and the six address bytes. Every AWDL node advertises the same one, so a
+ * peer takes the interface's frames whatever its own session state.
  */
+int mt_awdl_set_bssid(struct mt7932 *m, const u8 *mac)
+{
+	u8 payload[4 + ETH_ALEN];
+
+	put_unaligned_le32(1, payload);
+	memcpy(payload + 4, mac, ETH_ALEN);
+
+	return mt_awdl_tlv_cmd(m, MT7932_AWDL_TLV_BSSID, payload,
+			       sizeof(payload));
+}
+
+/* command_mutex held. The session operations that are left have no payload
+ * this driver has read: the vendor driver's channel list (type 2, 0x86
+ * bytes), sync master (9), PSF period (3), election parameters (0xa) and
+ * metric (0xb), action-frame mode (0xc) and minimum rate (0xd), edge RSSI
+ * (7) and out-of-band request (6) are all elements whose body was never
+ * reconstructed. A guessed body is what made the first probe loop
+ * uninformative, so these refuse instead, and name the id they need.
+ */
+int mt_awdl_data_cmd(struct mt7932 *m, u8 selector, const void *data, size_t length)
+{
+	return -EOPNOTSUPP;
+}
+
+int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN])
+{
+	return -EOPNOTSUPP;
+}
+
+int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length)
+{
+	return -EOPNOTSUPP;
+}
+
 int mt_awdl_election(struct mt7932 *m, u32 metric, s8 rssi_threshold)
 {
-	u8 body[6] = { 9 };
-
-	if (!mt_awdl_rf_ready(m))
-		return -ENODEV;
-	put_unaligned_le32(metric, body + 1);
-	body[5] = rssi_threshold;
-	return mt_request(m, 0x7e, true, true, true, body, sizeof(body));
+	return -EOPNOTSUPP;
 }
 
 /* --- vendor commands ---------------------------------------------------- */
@@ -823,20 +887,25 @@ static int mt_vendor_awdl_cmd_handler(struct wiphy *wiphy, struct wireless_dev *
 	if (len < (int)sizeof(*cmd))
 		return -EINVAL;
 	op = get_unaligned_le32(&cmd->op);
-	if (!op || op >= MT7932_VNDR_AWDL_OP_LAST)
+	if (op >= MT7932_VNDR_AWDL_OP_LAST)
 		return -EINVAL;
 
 	mutex_lock(&m->command_mutex);
 	switch (op) {
 	case MT7932_VNDR_AWDL_OP_ENABLE:
-		if (len != (int)sizeof(*cmd) + 3)
+		if (len != (int)sizeof(*cmd))
 			err = -EINVAL;
 		else
-			err = mt_awdl_session(m, true, cmd->body[0], cmd->body[1],
-					      cmd->body[2]);
+			err = mt_awdl_session(m, true);
+		break;
+	case MT7932_VNDR_AWDL_OP_BSSID:
+		if (len != (int)sizeof(*cmd) + ETH_ALEN)
+			err = -EINVAL;
+		else
+			err = mt_awdl_set_bssid(m, cmd->body);
 		break;
 	case MT7932_VNDR_AWDL_OP_DISABLE:
-		err = mt_awdl_session(m, false, 0, 0, 0);
+		err = mt_awdl_session(m, false);
 		break;
 	case MT7932_VNDR_AWDL_OP_SERVICE:
 	case MT7932_VNDR_AWDL_OP_TEMPLATE:

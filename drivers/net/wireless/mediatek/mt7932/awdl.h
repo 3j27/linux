@@ -23,29 +23,66 @@
  * AWDL BSS as a little-endian 16-bit value in bytes 3-4; AWDL data frames
  * carry that entry in the receive descriptor.
  *
- * The AWDL strings, together with a runtime-CID handler-registry entry at
- * 0x7e, make runtime CID 0x7e a plausible session-control command. Its body
- * ABI has NOT been confirmed. The operations below are the current probe
- * hypothesis only; do not treat these layouts or state selectors as a
- * firmware contract:
+ * Session control is runtime CID 0xf7, which the firmware's command
+ * registry maps to a handler at 0x918422. That handler is a multiplexer:
+ * every 0xf7 body is a header and a list of elements,
  *
- *   1 enable  {1, master 2 GHz channel, peer 5 GHz channel, slot density}
- *   2 disable {2}
- *   3 service record  {3, u16 length, bytes}  (advertised in MIFs)
- *   4 PSF template    {4, u16 length, bytes}  (sync-frame body)
- *   5 action frame    {5, u16 length, bytes}  (one transmission)
- *   6 peer add        {6, mac[6]}
- *   7 peer remove     {7, mac[6]}
- *   8 state GET       {8, selector} answered with EID 0x7e; selectors:
- *                     0 advertisers, 1 statistics, 2 opmode, 3 channel
- *                     sequence, 4 sync parameters
- *   9 election        {9, u32 metric, s8 rssi threshold}
+ *   { __le16 count, __le16 reserved, { __le32 type, __le32 len, u8 len }[] }
  *
- * The firmware refuses 3-5 and 8 while the session is disabled; the driver
- * refuses them the same way rather than submitting commands the firmware
- * would answer with an error.
+ * and the element type picks the operation. The types and payload lengths
+ * below are what the vendor driver sends, byte for byte; the firmware
+ * answers each of these with an empty command reply (set, no response bit),
+ * so the driver never waits for one:
+ *
+ *   0x00 bssid          { __le32 1, mac[6] }
+ *   0x02 channel list   { 0x86 bytes }
+ *   0x03 psf period     { 8 bytes }
+ *   0x06 oob auto       { 0xc bytes }
+ *   0x07 edge rssi      { 5 bytes }
+ *   0x08 enable/disable { __le32 1, __le16 on }
+ *   0x09 sync master    { 0x1e bytes }
+ *   0x0a election params{ 0x15 bytes }
+ *   0x0b election metric{ 8 bytes }
+ *   0x0c af tx mode     { 8 bytes }
+ *   0x0d min af rate    { 5 bytes }
+ *   0x10 action frame   { 0x19 + length bytes }
+ *
+ * A payload layout is only claimed here once it was read out of the vendor
+ * driver; the driver refuses an operation whose payload it has not.
+ *
+ * Bringing the session up is a fixed order, and none of these commands
+ * reports failure, so the order and the BSS state each command leaves
+ * behind are the contract:
+ *
+ *   1. CID 0x12 with BSS 1 inactive and the AWDL operation mode (7);
+ *   2. CID 0x11 activates BSS 1 (net type 5, the interface address, the
+ *      broadcast-WTBL entry the firmware assigns);
+ *   3. CID 0x12 again with BSS 1 active;
+ *   4. CID 0xf7 with the sync-frame payload elements, then type 8 with the
+ *      on flag, then type 0 with the BSSID.
+ *
+ * EID 0x11 with BSS index 1 is the only thing that says the firmware
+ * accepted the activation: it carries the absence byte, the transmit quota
+ * and the WTBL entry the firmware assigned, and it is what the presence
+ * path below waits for.
  */
 #define MT7932_AWDL_BSS 1
+
+/* Runtime CID 0xf7 element types (see the table above). */
+#define MT7932_AWDL_TLV_BSSID 0x00
+#define MT7932_AWDL_TLV_ENABLE 0x08
+
+/* An 0xf7 body is a four-byte header plus type and length per element. */
+#define MT7932_AWDL_TLV_HDR 8
+#define MT7932_AWDL_TLV_OVERHEAD (4 + MT7932_AWDL_TLV_HDR)
+
+/* The operation mode the firmware calls AWDL, in CID 0x12's third byte. */
+#define MT7932_AWDL_OPMODE 7
+
+/* CID 0x12's body: four bytes of BSS state, then the BSS description the
+ * firmware keeps in the same order the host does.
+ */
+#define MT7932_AWDL_BSSINFO_LEN 0x74
 
 /* Slot density of the firmware's availability schedule: idle windows,
  * active windows around the station's association, or the mirror map used

@@ -162,9 +162,20 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		goto unlock;
 	}
 	if (event.eid == 0x11) {
+		const u8 *body = event.packet + 36;
+
 		/* Both BSSs answer with EID 0x11; each handler checks its
-		 * own BSS index in the body and ignores the other's.
+		 * own BSS index in the body and ignores the other's, so a
+		 * report for a BSS the driver is not driving is dropped by
+		 * both. Log it here, where every index is seen: while the
+		 * AWDL BSS is being brought up, this is the only thing that
+		 * says the firmware took the activation.
 		 */
+		if (event.length >= 41)
+			dev_dbg_ratelimited(&m->pdev->dev,
+					    "BSS_REPORT: bss=%u absent=%u quota=%u wtbl=%u\n",
+					    body[0], body[1], body[2],
+					    get_unaligned_le16(body + 3));
 		if (IS_ENABLED(CONFIG_MT7932_AWDL))
 			mt_awdl_presence(m, &event);
 		mt_bss_presence(m, &event);
