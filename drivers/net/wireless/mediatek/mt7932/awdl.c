@@ -640,6 +640,20 @@ static int mt_awdl_set_mac_address(struct net_device *netdev, void *address)
 						       mt7932_awdl_wtbl);
 			if (!ret)
 				ret = mt_awdl_set_bssid(m, mac);
+			if (!ret) {
+				/* The re-activation above is the only evidence
+				 * this firmware ever gives that the BSS is
+				 * back: it reports no presence event, so the
+				 * gate cleared at the top of this function
+				 * must be restored here. Leaving it clear makes
+				 * the interface accept frames and drop every
+				 * one of them.
+				 */
+				spin_lock_irqsave(&m->data_lock, flags);
+				m->awdl_present = true;
+				m->awdl_absent = false;
+				spin_unlock_irqrestore(&m->data_lock, flags);
+			}
 			if (ret) {
 				spin_lock_irqsave(&m->response_lock, flags);
 				WRITE_ONCE(m->awdl_active, false);
