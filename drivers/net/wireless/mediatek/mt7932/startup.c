@@ -828,7 +828,13 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	*(struct mt7932 **)wiphy_priv(m->wiphy) = m;
 	set_wiphy_dev(m->wiphy, &m->pdev->dev);
 	ether_addr_copy(m->wiphy->perm_addr, m->mac);
-	m->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+	/* awdl0 is registered by hand with iftype ADHOC so supplicants leave
+	 * it alone, and cfg80211 only lets a netdev come up if its type is in
+	 * interface_modes. The firmware owns both interfaces; no nl80211
+	 * operation is accepted for either type except the station commands.
+	 */
+	m->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
+				    BIT(NL80211_IFTYPE_ADHOC);
 	m->wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 	m->wiphy->cipher_suites = ciphers;
 	m->wiphy->n_cipher_suites = ARRAY_SIZE(ciphers);
