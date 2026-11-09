@@ -191,6 +191,13 @@ int mt_scan_quiesce(struct mt7932 *m)
 	if (READ_ONCE(m->scan_request) || READ_ONCE(m->retired_scan_seq))
 		wait_for_completion_timeout(&m->scan_done, msecs_to_jiffies(5000));
 	mt_scan_retire_wait(m, msecs_to_jiffies(2000));
+	/* The done event for a cancelled batch is not guaranteed on this
+	 * firmware. Leaving the sequence reserved made the disconnect path
+	 * declare the link failed and refuse every later scan/connect until a
+	 * reboot. With no scan in flight, release it here as well.
+	 */
+	if (READ_ONCE(m->retired_scan_seq))
+		mt_scan_settle_retired(m);
 	return READ_ONCE(m->retired_scan_seq) ? -EBUSY : 0;
 }
 
