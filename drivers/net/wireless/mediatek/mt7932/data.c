@@ -128,7 +128,7 @@ void mt_data_complete(struct mt7932 *m, const u8 *packet, size_t length)
 		if (m->data_retired[token])
 			m->data_live[token] = false;
 		if (awdl && READ_ONCE(mt7932_awdl_trace))
-			dev_info_ratelimited(&m->pdev->dev, "awdl txstatus: token=%u tx_status=0x0000\n",
+			dev_info_ratelimited(&m->pdev->dev, "awdl tx buffer released: token=%u (delivery unverified)\n",
 					     token);
 	}
 	mt_data_clean_locked(m);

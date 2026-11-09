@@ -54,6 +54,7 @@ static void mt_awdl_encap_frame_test(struct kunit *test)
 	KUNIT_EXPECT_MEMEQ(test, skb->data + 30, mt_awdl_test_eth + 14,
 			   sizeof(mt_awdl_test_eth) - 14);
 	KUNIT_EXPECT_TRUE(test, mt7932_awdl_frame(skb));
+	KUNIT_EXPECT_TRUE(test, mt7932_awdl_payload(skb->data, skb->len));
 	kfree_skb(skb);
 }
 
@@ -175,7 +176,25 @@ static void mt_awdl_decap_short_test(struct kunit *test)
 	kfree_skb(skb);
 }
 
+static void mt_awdl_payload_length_test(struct kunit *test)
+{
+	u8 frame[ETH_HLEN + ETH_DATA_LEN] = {};
+
+	memcpy(frame + ETH_HLEN, mt7932_awdl_snap, sizeof(mt7932_awdl_snap));
+	/* Both values expose an accidental second byte swap: 62 becomes
+	 * 15872, while the non-length value 1536 becomes 6.
+	 */
+	put_unaligned_be16(62, frame + 2 * ETH_ALEN);
+	KUNIT_EXPECT_TRUE(test, mt7932_awdl_payload(frame, ETH_HLEN + 62));
+	put_unaligned_be16(ETH_DATA_LEN, frame + 2 * ETH_ALEN);
+	KUNIT_EXPECT_TRUE(test, mt7932_awdl_payload(frame, sizeof(frame)));
+	put_unaligned_be16(ETH_P_802_3_MIN, frame + 2 * ETH_ALEN);
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_payload(frame, sizeof(frame)));
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_payload(frame, ETH_HLEN - 1));
+}
+
 static struct kunit_case mt_awdl_test_cases[] = {
+	KUNIT_CASE(mt_awdl_payload_length_test),
 	KUNIT_CASE(mt_awdl_encap_frame_test),
 	KUNIT_CASE(mt_awdl_encap_sequence_test),
 	KUNIT_CASE(mt_awdl_encap_8023_test),

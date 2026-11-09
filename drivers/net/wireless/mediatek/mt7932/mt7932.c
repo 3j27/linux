@@ -310,11 +310,26 @@ static void mt_rx_drain(struct mt7932 *m, struct mt7932_ring *q)
 static irqreturn_t mt_irq(int irq, void *data)
 {
 	struct mt7932 *m = data;
+	u32 raw;
 
 	if (!READ_ONCE(m->running))
 		return IRQ_NONE;
-	if (!(mt_read(m, W + 0x200) & m->irq_mask))
+	raw = mt_read(m, W + 0x200);
+	if (!raw)
 		return IRQ_NONE;
+	if (!(raw & m->irq_mask)) {
+		/* A cause outside the enabled mask latched in the status
+		 * register, and nothing in the thread acknowledges it: only
+		 * raw & irq_mask is ever written back. This device stops
+		 * announcing new causes while one stays pending, so a single
+		 * unexpected bit silenced the line until the next boot.
+		 * Acknowledge it here; there is nothing to service for it.
+		 */
+		m->irq_unmasked |= raw;
+		m->irq_unmasked_passes++;
+		mt_write(m, W + 0x200, raw);
+		return IRQ_HANDLED;
+	}
 	mt_write(m, W + 0x204, 0);
 	return IRQ_WAKE_THREAD;
 }
@@ -348,7 +363,11 @@ static void mt_service(struct mt7932 *m)
 
 		mt_write(m, W + 0x1f0, sw);
 	}
-	mt_write(m, W + 0x200, causes);
+	/* Acknowledge every latched cause, not just the enabled ones: a status
+	 * bit outside the mask has no other owner and would otherwise stay set
+	 * forever.
+	 */
+	mt_write(m, W + 0x200, raw);
 	mt_read(m, W + 0x200);
 
 	mt_data_clean(m);

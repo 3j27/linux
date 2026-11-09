@@ -439,6 +439,16 @@ int mt_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 		    channel->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_20MHZ))
 			return -EINVAL;
 	}
+	/* A batch that was cancelled leaves its sequence reserved until the
+	 * firmware's done event arrives, and this firmware sometimes never
+	 * sends it. The connect and address-change paths wait out that event
+	 * and release the reservation; without the same wait here a single
+	 * lost event made every later scan fail with EIO, so iwd could not
+	 * even list networks again. Nothing is in flight when scan_request
+	 * is NULL, so the wait is bounded and cannot steal a live scan.
+	 */
+	if (READ_ONCE(m->retired_scan_seq) && !READ_ONCE(m->scan_request))
+		mt_scan_settle_retired(m);
 	mutex_lock(&m->command_mutex);
 	spin_lock_irqsave(&m->response_lock, flags);
 	ret = mt_scan_admit(m);

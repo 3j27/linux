@@ -156,7 +156,7 @@ static inline bool mt7932_awdl_payload(const void *data, size_t length)
 	const u8 *p = data;
 
 	return length >= MT7932_AWDL_DATA_MIN_LEN &&
-	       ntohs(get_unaligned_be16(p + 2 * ETH_ALEN)) <= ETH_DATA_LEN &&
+	       get_unaligned_be16(p + 2 * ETH_ALEN) <= ETH_DATA_LEN &&
 	       !memcmp(p + ETH_HLEN, mt7932_awdl_snap, sizeof(mt7932_awdl_snap));
 }
 
