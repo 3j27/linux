@@ -150,6 +150,7 @@ static void mt_scan_retire_wait(struct mt7932 *m, unsigned long timeout)
 void mt_scan_settle_retired(struct mt7932 *m)
 {
 	unsigned long deadline = jiffies + msecs_to_jiffies(2000);
+	unsigned long flags;
 	long left;
 
 	while (READ_ONCE(m->retired_scan_seq) && !READ_ONCE(m->scan_request) &&
@@ -157,6 +158,25 @@ void mt_scan_settle_retired(struct mt7932 *m)
 		left = (long)(deadline - jiffies);
 		if (left <= 0 || !wait_for_completion_timeout(&m->scan_done, left))
 			break;
+	}
+	/* This firmware does not always send the cancelled batch's done
+	 * event. The sequence then stays reserved forever and every reconnect
+	 * is refused with EBUSY, which is how a lost association during an
+	 * AWDL window turned into a station that only a reboot could restore.
+	 * The batch is cancelled and no scan is in flight here, so release
+	 * the reservation rather than deadlocking the link.
+	 */
+	if (READ_ONCE(m->retired_scan_seq) && !READ_ONCE(m->scan_request) &&
+	    !READ_ONCE(m->stopping) && mt_rf_allowed(m)) {
+		spin_lock_irqsave(&m->response_lock, flags);
+		if (m->retired_scan_seq && !m->scan_request && !m->stopping) {
+			dev_warn_ratelimited(&m->pdev->dev,
+					     "retired scan %u never completed; releasing it\n",
+					     m->retired_scan_seq);
+			m->retired_scan_seq = 0;
+			complete(&m->scan_done);
+		}
+		spin_unlock_irqrestore(&m->response_lock, flags);
 	}
 }
 
