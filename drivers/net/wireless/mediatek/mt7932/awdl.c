@@ -93,6 +93,7 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl);
 static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
 				u8 wtbl);
 static void mt_awdl_peer_reset(struct mt7932 *m);
+static int mt_awdl_bss_queue(struct mt7932 *m);
 
 static bool mt_awdl_rf_ready(const struct mt7932 *m)
 {
@@ -435,6 +436,8 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	if (!ret)
 		ret = mt_awdl_bss_activate(m, true, mac, wtbl);
 	if (!ret)
+		ret = mt_awdl_bss_queue(m);
+	if (!ret)
 		ret = mt_awdl_bss_info(m, true, wtbl);
 	if (ret)
 		dev_err(&m->pdev->dev, "AWDL_CREATE_WTBL: entry=%u ret=%d\n", wtbl, ret);
@@ -754,6 +757,8 @@ static int mt_awdl_set_mac_address(struct net_device *netdev, void *address)
 			spin_unlock_irqrestore(&m->response_lock, flags);
 			ret = mt_awdl_bss_activate(m, true, mac, wtbl);
 			if (!ret)
+				ret = mt_awdl_bss_queue(m);
+			if (!ret)
 				ret = mt_awdl_bss_info(m, true, wtbl);
 			if (!ret)
 				ret = mt_awdl_set_bssid(m, mac);
@@ -942,6 +947,26 @@ static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
 	memcpy(body + 4, mac, ETH_ALEN);
 
 	return mt_request(m, 0x11, true, true, false, body, sizeof(body));
+}
+
+/* command_mutex held. Allocate the AWDL BSS's own TX queues. The vendor
+ * driver's `_awdlDevInit`/BSS activation path allocates a BSS queue set
+ * (`_nicTxQAllocForBss`), which for a BSS with no queue index sets the token
+ * base to 1 and the bitmap to 0xf, and sends CID 0x6b with the BSS update
+ * selector. The station BSS gets the same command when it associates; a
+ * second BSS without it has no queue for the firmware to drain TX0 into,
+ * which is consistent with frames being accepted by the driver and never
+ * appearing on air.
+ */
+static int mt_awdl_bss_queue(struct mt7932 *m)
+{
+	u8 queue[32] = {};
+
+	put_unaligned_le16(15, queue);		/* BSS queue bitmap */
+	queue[2] = 1;				/* BSS update */
+	queue[3] = MT7932_AWDL_BSS;		/* BSS index */
+	queue[14] = 1;				/* token base when bss+0x1b is 0 */
+	return mt_request(m, 0x6b, true, true, false, queue, sizeof(queue));
 }
 
 /* command_mutex held. Turn the firmware's AWDL session on or off: element
