@@ -54,28 +54,21 @@ static int mt7932_awdl_enable = 1;
 module_param_named(awdl, mt7932_awdl_enable, int, 0444);
 MODULE_PARM_DESC(awdl, "AWDL interface creation through the vendor command (default 1, 0 turns it off)");
 
-/* AWDL tx completions are logged per frame. Userspace counts them to tell a
- * radio that is transmitting from one whose firmware has parked the AWDL
- * data path, and turns this on only while it checks.
+/* Opt-in host buffer-release logging, not proof of over-air delivery.
  */
 int mt7932_awdl_trace;
 module_param_named(awdl_trace, mt7932_awdl_trace, int, 0644);
-MODULE_PARM_DESC(awdl_trace, "Log AWDL tx completions");
+MODULE_PARM_DESC(awdl_trace, "Log AWDL TX buffer releases (delivery unverified)");
 
-/* The WTBL entry of the AWDL BSS: sent in the activation and the BSS
- * description, written into the header of every frame the interface
- * transmits, and matched against received frames. The vendor driver asks
- * its security layer for a broadcast entry and passes what it gets; this
- * firmware reports no presence event, so the entry is never learned and
- * this is the only thing that can say it. The station's association takes
- * the station, broadcast and peer entries (seen as 1, 3 and 4), and the
- * AWDL BSS has an entry of its own in between: 2. Zero means unknown, and
- * with it the interface refuses to transmit rather than describe frames
- * with an entry the firmware may hand to another BSS.
+/* WTBL entry override for the AWDL BSS. Zero, the default, makes the driver
+ * choose an entry that the infrastructure association's own reply did not
+ * assign and that no peer record uses; a positive value pins it for
+ * diagnostics. The transmit path still refuses an entry it can observe the
+ * association owning. Peer unicast uses the entry its peer-add allocated.
  */
-int mt7932_awdl_wtbl = 2;
+int mt7932_awdl_wtbl;
 module_param_named(awdl_wtbl, mt7932_awdl_wtbl, int, 0644);
-MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: unknown, refuse to transmit)");
+MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: choose a free one when the BSS is created)");
 
 /* The own-MAC (OM) index the transmit descriptor names for AWDL frames. The
  * station BSS owns index 0; the AWDL BSS is a second BSS with its own address,
@@ -99,11 +92,48 @@ MODULE_PARM_DESC(awdl_omac, "Own-MAC (OM) index of the AWDL BSS (station is 0)")
 static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl);
 static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
 				u8 wtbl);
+static void mt_awdl_peer_reset(struct mt7932 *m);
 
 static bool mt_awdl_rf_ready(const struct mt7932 *m)
 {
 	return READ_ONCE(m->rf_ready) && !READ_ONCE(m->stopping) &&
 	       !READ_ONCE(m->link_failed) && !READ_ONCE(m->cal_state.error);
+}
+
+/* command_mutex held. The WTBL entry the AWDL BSS will name. The
+ * infrastructure association receives its own entries from the firmware's
+ * reply and the driver logs them; a module parameter overrides this for
+ * diagnostics. Zero here means no entry is available, and the caller must
+ * fail the BSS activation rather than publish a guessed index.
+ */
+static u16 mt_awdl_wtbl_select(struct mt7932 *m)
+{
+	unsigned long flags;
+	u16 candidate;
+
+	if (mt7932_awdl_wtbl > 0)
+		return min_t(u16, mt7932_awdl_wtbl, 0x3ff);
+	/* Entry 0 is this driver's "unknown" sentinel. The association's
+	 * entries come out of the firmware's reply, so scan the AIS-side range
+	 * downward the way the vendor driver does.
+	 */
+	for (candidate = MT7932_AWDL_BSS_WTBL_MAX; candidate >= 1; candidate--) {
+		bool used = false;
+		unsigned int i;
+
+		spin_lock_irqsave(&m->response_lock, flags);
+		if (m->peer_valid)
+			used = mt7932_awdl_wtbl_conflicts(candidate,
+						m->peer_ids.wtbl,
+						ARRAY_SIZE(m->peer_ids.wtbl));
+		used |= m->peer_valid && candidate == m->peer_wtbl;
+		for (i = 0; i < MT_AWDL_PEERS; i++)
+			used |= m->awdl_peer_wtbl[i] == candidate;
+		spin_unlock_irqrestore(&m->response_lock, flags);
+		if (!used)
+			return candidate;
+	}
+	return 0;
 }
 
 /* data_lock held: AWDL TX admission mirrors the station BSS quota, with the
@@ -242,6 +272,7 @@ void mt_awdl_teardown_work(struct work_struct *work)
 	m->awdl_present = false;
 	m->awdl_wtbl = 0;
 	spin_unlock_irqrestore(&m->data_lock, flags);
+	mt_awdl_peer_reset(m);
 
 	unregister_netdev(netdev);
 	free_netdev(netdev);
@@ -306,6 +337,7 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	struct mt7932 *m = mt_from_wiphy(wiphy);
 	struct net_device *netdev;
 	struct wireless_dev *wdev;
+	u16 wtbl;
 	u8 mac[ETH_ALEN];
 	unsigned long flags;
 	int ret;
@@ -389,11 +421,21 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	 * inactive, activate it, then describe it again as active. None of
 	 * the three is answered; the presence event is the report.
 	 */
-	ret = mt_awdl_bss_info(m, false, 0xff);
+	wtbl = mt_awdl_wtbl_select(m);
+	if (!wtbl) {
+		ret = -ENOSPC;
+	} else {
+		spin_lock_irqsave(&m->data_lock, flags);
+		m->awdl_wtbl = wtbl;
+		spin_unlock_irqrestore(&m->data_lock, flags);
+		ret = mt_awdl_bss_info(m, false, 0xff);
+	}
 	if (!ret)
-		ret = mt_awdl_bss_activate(m, true, mac, mt7932_awdl_wtbl);
+		ret = mt_awdl_bss_activate(m, true, mac, wtbl);
 	if (!ret)
-		ret = mt_awdl_bss_info(m, true, mt7932_awdl_wtbl);
+		ret = mt_awdl_bss_info(m, true, wtbl);
+	if (ret)
+		dev_err(&m->pdev->dev, "AWDL_CREATE_WTBL: entry=%u ret=%d\n", wtbl, ret);
 	mutex_unlock(&m->command_mutex);
 	if (ret) {
 		/* A present event may already be in flight; retire through
@@ -439,7 +481,8 @@ int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev)
 	spin_unlock_irqrestore(&m->response_lock, flags);
 
 	mutex_lock(&m->command_mutex);
-	ret = mt_awdl_bss_activate(m, false, m->awdl_mac, mt7932_awdl_wtbl);
+	ret = mt_awdl_bss_activate(m, false, m->awdl_mac,
+				  READ_ONCE(m->awdl_wtbl) ?: mt_awdl_wtbl_select(m));
 	mutex_unlock(&m->command_mutex);
 	if (ret) {
 		spin_lock_irqsave(&m->response_lock, flags);
@@ -499,6 +542,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	dma_addr_t dma;
 	unsigned long flags;
 	unsigned int slot;
+	bool wtbl_conflict;
 	int ret;
 
 	/* The entry comes from a presence event when the firmware ever
@@ -514,6 +558,38 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 		goto drop;
 	if (tid > 7)
 		tid = 7;
+	/* The old fallback (2) overlaps the station association's reserved
+	 * WTBL resources. A released host token with that header says nothing
+	 * about AWDL delivery. Refuse cross-BSS identity instead of publishing
+	 * an observed conflicting index. peer_valid/peer_ids belong to response_lock;
+	 * do this before taking data_lock to preserve the nesting order.
+	 */
+	spin_lock_irqsave(&m->response_lock, flags);
+	wtbl_conflict = m->peer_valid &&
+		mt7932_awdl_wtbl_conflicts(wtbl, m->peer_ids.wtbl,
+					 ARRAY_SIZE(m->peer_ids.wtbl));
+	/* Unicast to a peer with a station record uses that peer's WTBL entry;
+	 * the BSS entry describes broadcast frames. Only the peer identity the
+	 * vendor command installed is matched, never a guessed index.
+	 */
+	if (!wtbl_conflict) {
+		unsigned int peer;
+
+		for (peer = 0; peer < ARRAY_SIZE(m->awdl_peer_mac); peer++) {
+			if (!m->awdl_peer_wtbl[peer] ||
+			    !ether_addr_equal(skb->data, m->awdl_peer_mac[peer]))
+				continue;
+			wtbl = m->awdl_peer_wtbl[peer];
+			break;
+		}
+	}
+	spin_unlock_irqrestore(&m->response_lock, flags);
+	if (wtbl_conflict) {
+		dev_warn_ratelimited(&m->pdev->dev,
+				    "AWDL_TX_WTBL_CONFLICT: entry=%u belongs to infrastructure; refusing TX\n",
+				    wtbl);
+		goto drop;
+	}
 	if (skb_headroom(skb) < MT7932_AWDL_ENCAP_LEN || skb_header_cloned(skb)) {
 		ret = pskb_expand_head(skb,
 			ALIGN(MT7932_AWDL_ENCAP_LEN - skb_headroom(skb), NET_SKB_PAD),
@@ -623,6 +699,7 @@ static int mt_awdl_set_mac_address(struct net_device *netdev, void *address)
 	spin_lock_irqsave(&m->data_lock, flags);
 	m->awdl_present = false;
 	spin_unlock_irqrestore(&m->data_lock, flags);
+	mt_awdl_peer_reset(m);
 
 	ret = eth_mac_addr(netdev, address);
 	if (!ret) {
@@ -631,20 +708,20 @@ static int mt_awdl_set_mac_address(struct net_device *netdev, void *address)
 		 * BSSID moved with it. The absence and presence events that
 		 * answer re-derive the WTBL entry.
 		 */
+		u16 wtbl;
 		u8 mac[ETH_ALEN];
 
 		ether_addr_copy(mac, sa->sa_data);
 		ether_addr_copy(m->awdl_mac, mac);
-		ret = mt_awdl_bss_activate(m, false, mac, mt7932_awdl_wtbl);
+		wtbl = READ_ONCE(m->awdl_wtbl) ?: mt_awdl_wtbl_select(m);
+		ret = mt_awdl_bss_activate(m, false, mac, wtbl);
 		if (!ret) {
 			spin_lock_irqsave(&m->response_lock, flags);
 			WRITE_ONCE(m->awdl_active, true);
 			spin_unlock_irqrestore(&m->response_lock, flags);
-			ret = mt_awdl_bss_activate(m, true, mac,
-						  mt7932_awdl_wtbl);
+			ret = mt_awdl_bss_activate(m, true, mac, wtbl);
 			if (!ret)
-				ret = mt_awdl_bss_info(m, true,
-						       mt7932_awdl_wtbl);
+				ret = mt_awdl_bss_info(m, true, wtbl);
 			if (!ret)
 				ret = mt_awdl_set_bssid(m, mac);
 			if (!ret) {
@@ -935,9 +1012,133 @@ int mt_awdl_data_cmd(struct mt7932 *m, u8 selector, const void *data, size_t len
 	return -EOPNOTSUPP;
 }
 
+/* Peer records describe this firmware BSS, so they die with it. Caller holds
+ * (or is about to publish) the gate that stops the transmit path.
+ */
+static void mt_awdl_peer_reset(struct mt7932 *m)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&m->response_lock, flags);
+	memset(m->awdl_peer_mac, 0, sizeof(m->awdl_peer_mac));
+	memset(m->awdl_peer_station, 0, sizeof(m->awdl_peer_station));
+	memset(m->awdl_peer_wtbl, 0, sizeof(m->awdl_peer_wtbl));
+	m->awdl_peer_count = 0;
+	spin_unlock_irqrestore(&m->response_lock, flags);
+}
+
+/* command_mutex held. Install one peer station record for the AWDL BSS.
+ *
+ * Apple's driver allocates a station ID and a WTBL entry, fills a 200-byte
+ * station description, and sends it as CID 0x13 SET. It then starts data
+ * only after the firmware reports the peer through its station-record event.
+ * This driver has no verified remove command and no verified source for the
+ * peer-capability fields, so a removal is refused rather than faked, and a
+ * record is only added when the caller names the peer explicitly.
+ */
 int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN])
 {
-	return -EOPNOTSUPP;
+	u8 body[MT7932_AWDL_PEER_BODY_LEN];
+	u8 queue[32];
+	unsigned long flags;
+	unsigned int slot, peer;
+	u8 station = 0, wtbl = 0;
+	bool exists = false;
+	int ret;
+
+	if (!is_valid_ether_addr(mac))
+		return -EINVAL;
+
+	spin_lock_irqsave(&m->response_lock, flags);
+	for (peer = 0; peer < MT_AWDL_PEERS; peer++)
+		if (m->awdl_peer_wtbl[peer] &&
+		    ether_addr_equal(mac, m->awdl_peer_mac[peer])) {
+			exists = true;
+			break;
+		}
+	spin_unlock_irqrestore(&m->response_lock, flags);
+
+	if (!add) {
+		/* No verified firmware removal exists. Reporting success would
+		 * leave a live peer record the host no longer tracks.
+		 */
+		return -EOPNOTSUPP;
+	}
+	if (exists)
+		return 0;
+	if (!READ_ONCE(m->awdl_active))
+		return -ENODEV;
+
+	/* Station IDs 2..14 are Apple's non-AIS range; WTBL 2..5 already belong
+	 * to the infrastructure link, and the AWDL BSS entry is excluded too.
+	 */
+	for (station = MT7932_AWDL_FIRST_STATION;
+	     station <= MT7932_AWDL_LAST_STATION; station++) {
+		bool used = false;
+
+		spin_lock_irqsave(&m->response_lock, flags);
+		for (peer = 0; peer < MT_AWDL_PEERS; peer++)
+			used |= m->awdl_peer_station[peer] == station;
+		for (peer = 0; peer < ARRAY_SIZE(m->peer_ids.station); peer++)
+			used |= m->peer_valid && m->peer_ids.station[peer] == station;
+		spin_unlock_irqrestore(&m->response_lock, flags);
+		if (!used)
+			break;
+	}
+	if (station > MT7932_AWDL_LAST_STATION)
+		return -ENOSPC;
+
+	for (wtbl = MT7932_AWDL_FIRST_WTBL; wtbl <= MT7932_AWDL_LAST_WTBL; wtbl++) {
+		bool used = wtbl == READ_ONCE(m->awdl_wtbl);
+
+		spin_lock_irqsave(&m->response_lock, flags);
+		for (peer = 0; peer < MT_AWDL_PEERS; peer++)
+			used |= m->awdl_peer_wtbl[peer] == wtbl;
+		used |= m->peer_valid &&
+			mt7932_awdl_wtbl_conflicts(wtbl, m->peer_ids.wtbl,
+						ARRAY_SIZE(m->peer_ids.wtbl));
+		spin_unlock_irqrestore(&m->response_lock, flags);
+		if (!used)
+			break;
+	}
+	if (wtbl > MT7932_AWDL_LAST_WTBL)
+		return -ENOSPC;
+
+	mt7932_awdl_peer_body(body, station, mac, MT7932_AWDL_BSS, wtbl);
+	ret = mt_request(m, 0x13, true, true, false, body, sizeof(body));
+	if (ret)
+		return ret;
+
+	/* The vendor driver allocates the peer's TX queues immediately after
+	 * the station update (`_cnmStaRecAllocSeq` calls `_nicTxQAlloc`, which
+	 * binds the station to the BSS queues with CID 0x6b). Without it the
+	 * firmware accepts the record and then flushes every data frame for
+	 * the peer's WTBL entry. The station path uses the same helper.
+	 */
+	memset(queue, 0, sizeof(queue));
+	mt7932_peer_queue(queue, station, true);
+	ret = mt_request(m, 0x6b, true, true, false, queue, sizeof(queue));
+	if (ret)
+		return ret;
+
+	spin_lock_irqsave(&m->response_lock, flags);
+	for (slot = 0; slot < MT_AWDL_PEERS; slot++)
+		if (!m->awdl_peer_wtbl[slot])
+			break;
+	if (slot < MT_AWDL_PEERS) {
+		m->awdl_peer_station[slot] = station;
+		m->awdl_peer_wtbl[slot] = wtbl;
+		memcpy(m->awdl_peer_mac[slot], mac, ETH_ALEN);
+		m->awdl_peer_count++;
+	}
+	spin_unlock_irqrestore(&m->response_lock, flags);
+	if (slot == MT_AWDL_PEERS)
+		return -ENOSPC;
+
+	dev_info(&m->pdev->dev,
+		 "AWDL_PEER_ADDED: mac=%pM station=%u wtbl=%u (acceptance unconfirmed)\n",
+		 mac, station, wtbl);
+	return 0;
 }
 
 int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length)
@@ -1228,7 +1429,7 @@ static int mt_awdl_actions_show(struct seq_file *s, void *unused)
 	s8 signal[MT_AWDL_CAPTURE_SLOTS];
 	u8 channel[MT_AWDL_CAPTURE_SLOTS], next;
 	unsigned long flags;
-	unsigned int i, slot;
+	unsigned int i, slot, offset;
 	u32 total;
 	u8 *data;
 
@@ -1257,10 +1458,10 @@ static int mt_awdl_actions_show(struct seq_file *s, void *unused)
 		/* %*ph stops at 64 bytes, and a PSF is longer than that; print it
 		 * in chunks so nothing is lost to the format's limit.
 		 */
-		for (i = 0; i < len[slot]; i += 64) {
-			unsigned int chunk = min_t(unsigned int, len[slot] - i, 64);
+		for (offset = 0; offset < len[slot]; offset += 64) {
+			unsigned int chunk = min_t(unsigned int, len[slot] - offset, 64);
 			seq_printf(s, "  %*ph\n", chunk,
-				   data + (size_t)slot * MT_AWDL_CAPTURE_BYTES + i);
+				   data + (size_t)slot * MT_AWDL_CAPTURE_BYTES + offset);
 		}
 	}
 	kfree(data);

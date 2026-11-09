@@ -68,6 +68,61 @@
  */
 #define MT7932_AWDL_BSS 1
 
+/* Peer station records the driver may set up for the firmware's AWDL BSS.
+ * Apple's allocator takes station IDs from 2 up for non-AIS station types
+ * (`_cnmStaRecAllocSeq` starts at 2 unless the type is 0x41, the AIS link),
+ * and a separate WTBL index, which the host chooses when it builds the
+ * connect body. The infrastructure link owns IDs 0/1 and WTBL 2..5 here, so
+ * AWDL peers start above those.
+ */
+#define MT_AWDL_PEERS 4
+#define MT7932_AWDL_FIRST_STATION 2
+#define MT7932_AWDL_LAST_STATION 14
+/* `_secPrivacySeekForEntrySeq` scans the AIS side downward from 7 and the
+ * non-AIS (peer) side upward from 8, bounded by the table capacity. The
+ * infrastructure association's own entries come out of the firmware's
+ * connect reply, so a peer record uses 8..13 and the BSS entry 1..7.
+ */
+#define MT7932_AWDL_FIRST_WTBL 8
+#define MT7932_AWDL_LAST_WTBL 13
+#define MT7932_AWDL_BSS_WTBL_MAX 7
+#define MT7932_AWDL_STATION_TYPE 0x10
+#define MT7932_AWDL_STATION_START 2
+#define MT7932_AWDL_PEER_BODY_LEN 200
+
+/* One peer station update, CID 0x13. The layout below was read from
+ * `_cnmStaSendUpdateCmd` and confirmed by executing the DEXT's own x86_64
+ * code for an AWDL peer allocation in an emulator: the resulting 200-byte
+ * body carried the station ID, type 0x10, the peer MAC, BSS 1, the assigned
+ * WTBL index, and the literals reproduced here. Bytes this function leaves
+ * zero are the peer-capability fields Apple fills from the peer's sync
+ * frame; no value for them has been established for this driver, so they
+ * are not invented. Caller must not assume the firmware accepted the record.
+ */
+static inline void mt7932_awdl_peer_body(u8 body[MT7932_AWDL_PEER_BODY_LEN],
+					 u8 station, const u8 mac[ETH_ALEN],
+					 u8 bss, u8 wtbl)
+{
+	memset(body, 0, MT7932_AWDL_PEER_BODY_LEN);
+	body[0x00] = station;
+	body[0x01] = MT7932_AWDL_STATION_TYPE;
+	memcpy(body + 0x02, mac, ETH_ALEN);
+	body[0x0c] = bss;
+	/* Apple's AWDL peer setup sets these host fields before the update:
+	 * station+0x32c = 1, state = 2 (start), station+0x54 = 1,
+	 * station+0x5a = 3, and the local aggregation policy it derives is 3.
+	 */
+	body[0x12] = 1;
+	body[0x14] = MT7932_AWDL_STATION_START;
+	body[0x17] = 1;
+	put_unaligned_le32(1, body + 0x24);
+	body[0x30] = 3;
+	body[0x36] = wtbl;
+	body[0x37] = 0xff;
+	body[0x44] = 3;
+	body[0x7d] = 1;
+}
+
 /* Runtime CID 0xf7 element types (see the table above). */
 #define MT7932_AWDL_TLV_BSSID 0x00
 #define MT7932_AWDL_TLV_CHANNELS 0x02
@@ -117,6 +172,21 @@ enum mt7932_awdl_density {
  * frames whatever its own session state.
  */
 #define MT7932_AWDL_BSSID { 0x00, 0x25, 0x00, 0xff, 0x94, 0x73 }
+
+/* A guessed AWDL entry must never name an infrastructure-owned WTBL slot.
+ * Station-record IDs are a separate namespace and are not in this list.
+ * Caller supplies a stable snapshot of the infrastructure WTBL resources.
+ */
+static inline bool mt7932_awdl_wtbl_conflicts(u16 wtbl, const u8 *infra_wtbl,
+					    size_t count)
+{
+	size_t i;
+
+	for (i = 0; i < count; i++)
+		if (wtbl == infra_wtbl[i])
+			return true;
+	return false;
+}
 
 /*
  * AWDL data frames on the air are 802.3 + LLC/SNAP (OUI 00:17:f2, protocol

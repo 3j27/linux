@@ -120,12 +120,11 @@ void mt_data_complete(struct mt7932 *m, const u8 *packet, size_t length)
 		bool awdl = false;
 
 		if (token >= ARRAY_SIZE(m->data_live) || !m->data_live[token] || !m->data_token[token]) {
-			/* The host never allocated this token, so the firmware
-			 * queued the frame itself (an AWDL PSF or a beacon).
-			 * Counting it is the only view of the firmware's own
-			 * transmissions this driver gets.
+			/* No currently owned host buffer matches this token. This
+			 * may also be a stale or duplicate release; it establishes
+			 * neither firmware origin nor over-air transmission.
 			 */
-			m->tx_fw_done++;
+			m->tx_unmatched_tokens++;
 			continue;
 		}
 		if (IS_ENABLED(CONFIG_MT7932_AWDL))

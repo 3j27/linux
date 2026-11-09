@@ -220,7 +220,7 @@ struct mt7932 {
 	/* TX completions whose token the host never allocated: frames the
 	 * firmware queued itself (AWDL PSFs, beacons). data_lock.
 	 */
-	u64 tx_fw_done;
+	u64 tx_unmatched_tokens;
 	/* Lifetime host RX observations, protected by response_lock. */
 	u64 rx_integrity, rx_malformed, rx_unsupported;
 	u64 rx_wrong_peer, rx_unprotected, rx_duplicate, rx_no_memory;
@@ -256,6 +256,8 @@ struct mt7932 {
 	 */
 #define MT_AWDL_CAPTURE_SLOTS 8
 #define MT_AWDL_CAPTURE_BYTES 512
+/* Peer station records for the firmware's AWDL BSS (awdl.h). */
+#define MT_AWDL_PEERS 4
 	u8 awdl_capture_data[MT_AWDL_CAPTURE_SLOTS][MT_AWDL_CAPTURE_BYTES];
 	u16 awdl_capture_len[MT_AWDL_CAPTURE_SLOTS];
 	u16 awdl_capture_fc[MT_AWDL_CAPTURE_SLOTS];
@@ -278,6 +280,15 @@ struct mt7932 {
 	u32 irq_mask;
 	void *ipc, *aux;
 	dma_addr_t ipc_dma, aux_dma;
+	/* AWDL peer station records (see awdl.h). Appended last so the
+	 * diagnostic helper's hard-coded offsets for the fields above stay
+	 * valid. Protected by response_lock, which the transmit path and the
+	 * receive demultiplexer already hold when they read them.
+	 */
+	u8 awdl_peer_count;
+	u8 awdl_peer_station[MT_AWDL_PEERS];
+	u8 awdl_peer_wtbl[MT_AWDL_PEERS];
+	u8 awdl_peer_mac[MT_AWDL_PEERS][ETH_ALEN];
 };
 
 /* What the connect worker reports once an attempt has its result. A move, a

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <kunit/test.h>
+#include <kunit/test-bug.h>
 #include <linux/skbuff.h>
 
 #include "mt7932.h"
@@ -193,7 +194,63 @@ static void mt_awdl_payload_length_test(struct kunit *test)
 	KUNIT_EXPECT_FALSE(test, mt7932_awdl_payload(frame, ETH_HLEN - 1));
 }
 
+static void mt_awdl_wtbl_conflict_test(struct kunit *test)
+{
+	static const u8 infra_wtbl[] = {2, 3, 4, 5};
+	u16 wtbl;
+
+	for (wtbl = 2; wtbl <= 5; wtbl++)
+		KUNIT_EXPECT_TRUE(test,
+			mt7932_awdl_wtbl_conflicts(wtbl, infra_wtbl,
+						 ARRAY_SIZE(infra_wtbl)));
+	/* Station-record IDs 0/1 are not WTBL ownership claims. */
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_wtbl_conflicts(0, infra_wtbl, 4));
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_wtbl_conflicts(1, infra_wtbl, 4));
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_wtbl_conflicts(6, infra_wtbl, 4));
+	/* Compare the full WTBL index, never just its low byte. */
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_wtbl_conflicts(258, infra_wtbl, 4));
+	KUNIT_EXPECT_FALSE(test, mt7932_awdl_wtbl_conflicts(2, NULL, 0));
+}
+
+static void mt_awdl_peer_body_test(struct kunit *test)
+{
+	static const u8 mac[ETH_ALEN] = { 0xaa, 0xbe, 0xcb, 0x9c, 0xe5, 0x1f };
+	u8 body[MT7932_AWDL_PEER_BODY_LEN];
+
+	mt7932_awdl_peer_body(body, 2, mac, MT7932_AWDL_BSS, 7);
+
+	/* Offsets confirmed by running the vendor driver's own allocator in an
+	 * emulator; see AWDL-PEER-ABI.md. Everything else must stay zero.
+	 */
+	KUNIT_EXPECT_EQ(test, body[0x00], (u8)2);
+	KUNIT_EXPECT_EQ(test, body[0x01], (u8)MT7932_AWDL_STATION_TYPE);
+	KUNIT_EXPECT_MEMEQ(test, body + 0x02, mac, ETH_ALEN);
+	KUNIT_EXPECT_EQ(test, body[0x0c], (u8)MT7932_AWDL_BSS);
+	KUNIT_EXPECT_EQ(test, body[0x12], (u8)1);
+	KUNIT_EXPECT_EQ(test, body[0x14], (u8)MT7932_AWDL_STATION_START);
+	KUNIT_EXPECT_EQ(test, body[0x17], (u8)1);
+	KUNIT_EXPECT_EQ(test, get_unaligned_le32(body + 0x24), (u32)1);
+	KUNIT_EXPECT_EQ(test, body[0x30], (u8)3);
+	KUNIT_EXPECT_EQ(test, body[0x36], (u8)7);
+	KUNIT_EXPECT_EQ(test, body[0x37], (u8)0xff);
+	KUNIT_EXPECT_EQ(test, body[0x44], (u8)3);
+	KUNIT_EXPECT_EQ(test, body[0x7d], (u8)1);
+	for (unsigned int i = 0; i < sizeof(body); i++) {
+		bool known = i < 8 || i == 0x0c || i == 0x12 || i == 0x14 ||
+			i == 0x17 || (i >= 0x24 && i < 0x28) || i == 0x30 ||
+			i == 0x36 || i == 0x37 || i == 0x44 || i == 0x7d;
+		if (!known)
+			KUNIT_EXPECT_EQ(test, body[i], (u8)0);
+	}
+	/* A different station/WTBL must not leak the previous values. */
+	mt7932_awdl_peer_body(body, 9, mac, MT7932_AWDL_BSS, 13);
+	KUNIT_EXPECT_EQ(test, body[0x00], (u8)9);
+	KUNIT_EXPECT_EQ(test, body[0x36], (u8)13);
+}
+
 static struct kunit_case mt_awdl_test_cases[] = {
+	KUNIT_CASE(mt_awdl_peer_body_test),
+	KUNIT_CASE(mt_awdl_wtbl_conflict_test),
 	KUNIT_CASE(mt_awdl_payload_length_test),
 	KUNIT_CASE(mt_awdl_encap_frame_test),
 	KUNIT_CASE(mt_awdl_encap_sequence_test),

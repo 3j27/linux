@@ -261,6 +261,14 @@ void mt_link_event(struct mt7932 *m, const struct mt7932_event *event)
 		}
 		m->peer_wtbl = body[21];
 		m->peer_valid = true;
+		/* The firmware's assigned IDs, logged so a diagnostic can pick a
+		 * WTBL entry that is not part of this association.
+		 */
+		dev_info(&m->pdev->dev,
+			 "ASSOC_RESOURCES: station=%u,%u wtbl=%u,%u,%u,%u peer_wtbl=%u\n",
+			 m->peer_ids.station[0], m->peer_ids.station[1],
+			 m->peer_ids.wtbl[0], m->peer_ids.wtbl[1],
+			 m->peer_ids.wtbl[2], m->peer_ids.wtbl[3], m->peer_wtbl);
 		/* HOST decoder confirms the RSN suite namespace, not request enum10. */
 		m->event_cipher = get_unaligned_le32(body + 48);
 		dev_dbg(&m->pdev->dev, "ASSOCIATED: peer=%u station=%u cipher-raw=%u\n",

@@ -30,7 +30,7 @@ static const char mt_rx_stat_names[][ETH_GSTRING_LEN] = {
 	"rx_2ghz_records",
 	"rx_5ghz_records",
 	"rx_6ghz_records",
-	"tx_fw_completions",
+	"tx_unmatched_tokens",
 };
 
 static int mt_get_sset_count(struct net_device *netdev, int set)
@@ -79,12 +79,13 @@ static void mt_get_ethtool_stats(struct net_device *netdev,
 	if (READ_ONCE(m->data_ready)) {
 		spin_lock_irqsave(&m->data_lock, flags);
 		data[21] = m->tx_free_events;
-		data[28] = m->tx_fw_done;
+		data[28] = m->tx_unmatched_tokens;
 		for (i = 0; i < ARRAY_SIZE(m->rx_band_records); i++)
 			data[25 + i] = m->rx_band_records[i];
 		spin_unlock_irqrestore(&m->data_lock, flags);
 	} else {
 		data[21] = 0;
+		data[28] = 0;
 		for (i = 0; i < ARRAY_SIZE(m->rx_band_records); i++)
 			data[25 + i] = 0;
 	}
