@@ -1254,8 +1254,14 @@ static int mt_awdl_actions_show(struct seq_file *s, void *unused)
 		seq_printf(s, "frame len %u fc 0x%04x wtbl %u channel %u signal %d\n",
 			   len[slot], fc[slot], wtbl[slot], channel[slot],
 			   signal[slot]);
-		seq_printf(s, "  %*ph\n", len[slot],
-			   data + (size_t)slot * MT_AWDL_CAPTURE_BYTES);
+		/* %*ph stops at 64 bytes, and a PSF is longer than that; print it
+		 * in chunks so nothing is lost to the format's limit.
+		 */
+		for (i = 0; i < len[slot]; i += 64) {
+			unsigned int chunk = min_t(unsigned int, len[slot] - i, 64);
+			seq_printf(s, "  %*ph\n", chunk,
+				   data + (size_t)slot * MT_AWDL_CAPTURE_BYTES + i);
+		}
 	}
 	kfree(data);
 	return 0;
