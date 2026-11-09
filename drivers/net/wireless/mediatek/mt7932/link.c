@@ -1088,6 +1088,18 @@ void mt_disconnect_work(struct work_struct *work)
 		mt_reg_apply_deferred_locked(m);
 	}
 	spin_unlock_irqrestore(&m->response_lock, flags);
+#if IS_ENABLED(CONFIG_MT7932_AWDL)
+	/* An AWDL session that outlives its station link holds the radio, and
+	 * the reconnect then times out and latches link_failed until a reboot.
+	 * Take the session down with the link; userspace can bring it back
+	 * once the station has rejoined.
+	 */
+	if (READ_ONCE(m->awdl_enabled) && !READ_ONCE(m->stopping)) {
+		mutex_lock(&m->command_mutex);
+		mt_awdl_session(m, false);
+		mutex_unlock(&m->command_mutex);
+	}
+#endif
 	dev_dbg(&m->pdev->dev, "DISCONNECTED: teardown=%d local=%u\n", ret, local);
 }
 
