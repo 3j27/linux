@@ -246,6 +246,20 @@ struct mt7932 {
 	bool awdl_active, awdl_enabled;
 	u8 awdl_quota;
 	u16 awdl_wtbl, awdl_tx_seq;
+	/* Received AWDL action frames, newest last, for the peer work. Filled
+	 * from the RX path under response_lock and read only through the
+	 * mt7932_awdl_actions debugfs file.
+	 */
+#define MT_AWDL_CAPTURE_SLOTS 8
+#define MT_AWDL_CAPTURE_BYTES 512
+	u8 awdl_capture_data[MT_AWDL_CAPTURE_SLOTS][MT_AWDL_CAPTURE_BYTES];
+	u16 awdl_capture_len[MT_AWDL_CAPTURE_SLOTS];
+	u16 awdl_capture_fc[MT_AWDL_CAPTURE_SLOTS];
+	u16 awdl_capture_wtbl[MT_AWDL_CAPTURE_SLOTS];
+	s8 awdl_capture_signal[MT_AWDL_CAPTURE_SLOTS];
+	u8 awdl_capture_channel[MT_AWDL_CAPTURE_SLOTS];
+	u8 awdl_capture_next;
+	u32 awdl_capture_total;
 	struct mt7932_duplicate awdl_duplicates[17];
 	/* TX0 slots carrying AWDL frames; data_lock. */
 	DECLARE_BITMAP(data_awdl, 512);
@@ -397,6 +411,9 @@ int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length);
 int mt_awdl_election(struct mt7932 *m, u32 metric, s8 rssi_threshold);
 void mt_awdl_presence(struct mt7932 *m, const struct mt7932_event *event);
 void mt_awdl_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame);
+void mt_awdl_capture_action(struct mt7932 *m, const struct mt7932_rx_frame *frame);
+void mt_awdl_debugfs_init(struct mt7932 *m);
+extern int mt7932_awdl_capture;
 void mt_awdl_attach_work(struct work_struct *work);
 void mt_awdl_teardown_work(struct work_struct *work);
 void mt_awdl_timeout(struct work_struct *work);

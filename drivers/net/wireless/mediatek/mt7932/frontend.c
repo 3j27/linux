@@ -757,6 +757,13 @@ void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 	}
 	if (!READ_ONCE(m->rf_ready))
 		return;
+	/* Management frames never reach the data path, so this is the only
+	 * place a received AWDL action frame can be seen. See awdl.c.
+	 */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) && READ_ONCE(mt7932_awdl_capture) &&
+	    !frame.translated &&
+	    (frame.frame_control & IEEE80211_FCTL_FTYPE) == IEEE80211_FTYPE_MGMT)
+		mt_awdl_capture_action(m, &frame);
 	channel = ieee80211_get_channel(m->wiphy,
 					ieee80211_channel_to_frequency(frame.channel, frame.band));
 	if (!channel || (channel->flags & IEEE80211_CHAN_DISABLED))

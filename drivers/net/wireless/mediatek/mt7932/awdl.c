@@ -37,6 +37,8 @@
 #include <linux/if_ether.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
 #include <net/cfg80211.h>
 #include <net/netlink.h>
 
@@ -1173,4 +1175,95 @@ const struct wiphy_vendor_command mt7932_vendor_cmds[] = {
 bool mt7932_awdl_enabled(void)
 {
 	return !!mt7932_awdl_enable;
+}
+
+/* --- received action-frame capture -------------------------------------- */
+
+/* The firmware runs the AWDL peer table itself: it consumes PSFs, MIFs and
+ * AWSFs, and nothing in this driver ever saw a received action frame. Apple's
+ * driver does see them, keeps a peer cache, and hands that cache back to the
+ * firmware when it seeds a peer with runtime element 0x10 (Unicast AWSF).
+ * That is the step this driver is missing, and its absence is why the TX
+ * manager refuses AWDL data frames even though sync (PSF) reaches peers.
+ *
+ * This ring captures the frames so the peer information can be obtained from
+ * what the peer actually sent instead of guessed. It is a debug aid: off by
+ * default, bounded, and read only through debugfs.
+ */
+int mt7932_awdl_capture;
+module_param_named(awdl_capture, mt7932_awdl_capture, int, 0644);
+MODULE_PARM_DESC(awdl_capture, "Capture received AWDL action frames for debugfs");
+
+void mt_awdl_capture_action(struct mt7932 *m, const struct mt7932_rx_frame *frame)
+{
+	unsigned long flags;
+	unsigned int slot;
+	u16 subtype = frame->frame_control & 0x00f0;
+
+	/* Action and action-no-ack only; beacons and probe responses are the
+	 * same management type and carry nothing the peer work needs.
+	 */
+	if (subtype != IEEE80211_STYPE_ACTION && subtype != 0x00e0)
+		return;
+	if (frame->length < 24 || frame->length > MT_AWDL_CAPTURE_BYTES)
+		return;
+	spin_lock_irqsave(&m->response_lock, flags);
+	slot = m->awdl_capture_next;
+	m->awdl_capture_len[slot] = frame->length;
+	m->awdl_capture_fc[slot] = frame->frame_control;
+	m->awdl_capture_wtbl[slot] = frame->wtbl;
+	m->awdl_capture_signal[slot] = mt7932_rx_signal(frame, m->antenna_mask);
+	m->awdl_capture_channel[slot] = frame->channel;
+	memcpy(m->awdl_capture_data[slot], frame->data, frame->length);
+	m->awdl_capture_next = (slot + 1) % MT_AWDL_CAPTURE_SLOTS;
+	m->awdl_capture_total++;
+	spin_unlock_irqrestore(&m->response_lock, flags);
+}
+
+static int mt_awdl_actions_show(struct seq_file *s, void *unused)
+{
+	struct mt7932 *m = s->private;
+	u16 len[MT_AWDL_CAPTURE_SLOTS], fc[MT_AWDL_CAPTURE_SLOTS];
+	u16 wtbl[MT_AWDL_CAPTURE_SLOTS];
+	s8 signal[MT_AWDL_CAPTURE_SLOTS];
+	u8 channel[MT_AWDL_CAPTURE_SLOTS], next;
+	unsigned long flags;
+	unsigned int i, slot;
+	u32 total;
+	u8 *data;
+
+	data = kmalloc(sizeof(m->awdl_capture_data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
+	spin_lock_irqsave(&m->response_lock, flags);
+	memcpy(data, m->awdl_capture_data, sizeof(m->awdl_capture_data));
+	memcpy(len, m->awdl_capture_len, sizeof(len));
+	memcpy(fc, m->awdl_capture_fc, sizeof(fc));
+	memcpy(wtbl, m->awdl_capture_wtbl, sizeof(wtbl));
+	memcpy(signal, m->awdl_capture_signal, sizeof(signal));
+	memcpy(channel, m->awdl_capture_channel, sizeof(channel));
+	next = m->awdl_capture_next;
+	total = m->awdl_capture_total;
+	spin_unlock_irqrestore(&m->response_lock, flags);
+
+	seq_printf(s, "captures: %u\n", total);
+	for (i = 0; i < MT_AWDL_CAPTURE_SLOTS; i++) {
+		slot = (next + i) % MT_AWDL_CAPTURE_SLOTS;
+		if (!len[slot])
+			continue;
+		seq_printf(s, "frame len %u fc 0x%04x wtbl %u channel %u signal %d\n",
+			   len[slot], fc[slot], wtbl[slot], channel[slot],
+			   signal[slot]);
+		seq_printf(s, "  %*ph\n", len[slot],
+			   data + (size_t)slot * MT_AWDL_CAPTURE_BYTES);
+	}
+	kfree(data);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(mt_awdl_actions);
+
+void mt_awdl_debugfs_init(struct mt7932 *m)
+{
+	debugfs_create_file("mt7932_awdl_actions", 0400, m->wiphy->debugfsdir,
+			    m, &mt_awdl_actions_fops);
 }

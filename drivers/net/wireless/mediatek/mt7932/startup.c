@@ -956,6 +956,8 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	}
 	m->wiphy_registered = true;
 	mt_policy_debugfs_init(m);
+	if (IS_ENABLED(CONFIG_MT7932_AWDL))
+		mt_awdl_debugfs_init(m);
 	ret = mt_register_interface(m);
 	if (ret)
 		return ret;
