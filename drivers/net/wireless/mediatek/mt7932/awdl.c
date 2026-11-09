@@ -78,6 +78,16 @@ MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: choose a free one wh
  * to the AWDL interface unclaimed on receive. The firmware assigns the index
  * when the second BSS is activated; this is the value it uses for it.
  */
+/* Diagnostic-only: force the WTBL entry named in every AWDL transmit
+ * descriptor, including entries the conflict guard would otherwise refuse.
+ * Used to tell "this BSS's TX binding is broken" from "TX0 never drains AWDL
+ * frames at all" by transmitting with an entry the firmware demonstrably
+ * services. Never for normal operation; 0 disables it.
+ */
+int mt7932_awdl_probe_wtbl;
+module_param_named(awdl_probe_wtbl, mt7932_awdl_probe_wtbl, int, 0644);
+MODULE_PARM_DESC(awdl_probe_wtbl, "Diagnostic: force this WTBL entry in AWDL TX descriptors (0: off)");
+
 int mt7932_awdl_omac = 1;
 module_param_named(awdl_omac, mt7932_awdl_omac, int, 0644);
 MODULE_PARM_DESC(awdl_omac, "Own-MAC (OM) index of the AWDL BSS (station is 0)");
@@ -544,6 +554,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	unsigned int own_mac = READ_ONCE(mt7932_awdl_omac);
 	u16 wtbl = READ_ONCE(m->awdl_wtbl);
 	u16 chosen = READ_ONCE(m->awdl_bss_wtbl);
+	int probe = READ_ONCE(mt7932_awdl_probe_wtbl);
 	u8 *payload, *header;
 	dma_addr_t dma;
 	unsigned long flags;
@@ -560,6 +571,17 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 		wtbl = chosen;
 	if (!wtbl && mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0xff)
 		wtbl = mt7932_awdl_wtbl;
+	/* Explicit module parameter outranks the creation-time choice, and the
+	 * diagnostic probe outranks both. Both are operator decisions.
+	 */
+	if (mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0x3ff)
+		wtbl = mt7932_awdl_wtbl;
+	if (probe > 0 && probe <= 0x3ff) {
+		wtbl = probe;
+		dev_warn_ratelimited(&m->pdev->dev,
+				    "AWDL_TX_PROBE_WTBL: forcing entry %d for every AWDL frame\n",
+				    probe);
+	}
 	if (!netif_running(netdev) || !netif_device_present(netdev) ||
 	    !READ_ONCE(m->awdl_registered) || !READ_ONCE(m->awdl_present) ||
 	    !READ_ONCE(m->awdl_enabled) || !mt_awdl_rf_ready(m) ||
@@ -601,7 +623,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	 * do this before taking data_lock to preserve the nesting order.
 	 */
 	spin_lock_irqsave(&m->response_lock, flags);
-	wtbl_conflict = m->peer_valid &&
+	wtbl_conflict = !probe && m->peer_valid &&
 		mt7932_awdl_wtbl_conflicts(wtbl, m->peer_ids.wtbl,
 					 ARRAY_SIZE(m->peer_ids.wtbl));
 	/* Unicast to a peer with a station record uses that peer's WTBL entry;
