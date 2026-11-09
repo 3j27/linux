@@ -783,6 +783,7 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 {
 	u8 body[MT7932_AWDL_BSSINFO_LEN] = {};
 
+	(void)wtbl;
 	body[0] = MT7932_AWDL_BSS;
 	body[1] = active;
 	body[2] = MT7932_AWDL_OPMODE;
@@ -792,13 +793,18 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 	 * availability windows, so it neither hears nor emits AWDL action frames.
 	 */
 	body[0x0a] = m->connect_channel;
+	/* Field offsets decoded from _nicUpdateBss (the 0x70-byte BSS blob is
+	 * copied from host bss+0x24 into body+4) and from the values _awdlDevInit
+	 * stores: the interface address lands at blob+0x26 (body+0x4a), the
+	 * type-5 marker, rate set and the constant 4 at body+0x5a.  The old
+	 * 0x3a write was overwritten by the firmware's rate-set selection, not
+	 * a WTBL entry.
+	 */
 	body[0x2a] = 1;
 	body[0x30] = 0xfe;
 	body[0x32] = 0x4b;
-	body[0x3a] = wtbl;
+	memcpy(body + 0x4a, m->awdl_mac, ETH_ALEN);
 	body[0x5a] = 4;
-	body[0x60] = 0xf0;
-	body[0x61] = 0x3f;
 
 	return mt_request(m, 0x12, true, true, false, body, sizeof(body));
 }
