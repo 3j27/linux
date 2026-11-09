@@ -327,9 +327,14 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	*(struct mt7932 **)netdev_priv(netdev) = m;
 	wdev->wiphy = wiphy;
 	/* cfg80211 needs some valid type for its bookkeeping; the firmware
-	 * side is what decides the interface behaviour.
+	 * side is what decides the interface behaviour. ADHOC, not STATION:
+	 * IWD and NetworkManager treat every STATION netdev as a candidate
+	 * for autoconnect, adopt awdl0 the moment it appears, and disturb
+	 * the station's association (observed as IWD listing awdl0 as its
+	 * only station and wlan0 failing to come back up). Apple's AWDL is a
+	 * peer link, and a supplicant has no business connecting it.
 	 */
-	wdev->iftype = NL80211_IFTYPE_STATION;
+	wdev->iftype = NL80211_IFTYPE_ADHOC;
 	wdev->netdev = netdev;
 	netdev->ieee80211_ptr = wdev;
 	netdev->netdev_ops = &mt_awdl_net_ops;
