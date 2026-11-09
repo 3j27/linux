@@ -755,7 +755,12 @@ static int mt_awdl_tlv_cmd(struct mt7932 *m, u32 type, const void *payload,
 	put_unaligned_le32(type, body + 4);
 	put_unaligned_le32(length, body + 8);
 	memcpy(body + MT7932_AWDL_TLV_HDR, payload, length);
-	ret = mt_request(m, 0xf7, true, true, false, body, total);
+	/* Original command table, not the runtime one: with runtime set the
+	 * firmware's dispatcher reads a different body layout and answers
+	 * "Body length mismatch (expected N, got 1)" for every element. The
+	 * raw probe path uses the original table and dispatches correctly.
+	 */
+	ret = mt_request(m, 0xf7, false, true, false, body, total);
 	kvfree(body);
 	return ret;
 }
