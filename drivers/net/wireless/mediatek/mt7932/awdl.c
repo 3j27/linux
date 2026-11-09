@@ -271,6 +271,7 @@ void mt_awdl_teardown_work(struct work_struct *work)
 	m->awdl_registered = false;
 	m->awdl_present = false;
 	m->awdl_wtbl = 0;
+	m->awdl_bss_wtbl = 0;
 	spin_unlock_irqrestore(&m->data_lock, flags);
 	mt_awdl_peer_reset(m);
 
@@ -427,6 +428,7 @@ int mt_awdl_add_vif(struct wiphy *wiphy, const char *name)
 	} else {
 		spin_lock_irqsave(&m->data_lock, flags);
 		m->awdl_wtbl = wtbl;
+		m->awdl_bss_wtbl = wtbl;
 		spin_unlock_irqrestore(&m->data_lock, flags);
 		ret = mt_awdl_bss_info(m, false, 0xff);
 	}
@@ -538,6 +540,7 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	unsigned int tid = cfg80211_classify8021d(skb, NULL);
 	unsigned int own_mac = READ_ONCE(mt7932_awdl_omac);
 	u16 wtbl = READ_ONCE(m->awdl_wtbl);
+	u16 chosen = READ_ONCE(m->awdl_bss_wtbl);
 	u8 *payload, *header;
 	dma_addr_t dma;
 	unsigned long flags;
@@ -545,17 +548,47 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	bool wtbl_conflict;
 	int ret;
 
-	/* The entry comes from a presence event when the firmware ever
-	 * reports one; until then it is what the module parameter says.
+	/* The entry comes from a presence event when the firmware reports
+	 * one. It reports zero for this BSS, and a module parameter of zero
+	 * means "chosen at creation", so fall back to that choice instead of
+	 * dropping every frame.
 	 */
+	if (!wtbl)
+		wtbl = chosen;
 	if (!wtbl && mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0xff)
 		wtbl = mt7932_awdl_wtbl;
 	if (!netif_running(netdev) || !netif_device_present(netdev) ||
 	    !READ_ONCE(m->awdl_registered) || !READ_ONCE(m->awdl_present) ||
 	    !READ_ONCE(m->awdl_enabled) || !mt_awdl_rf_ready(m) ||
 	    !wtbl || !READ_ONCE(m->data_ready) || skb->len < ETH_HLEN ||
-	    skb->len > ETH_FRAME_LEN + VLAN_HLEN)
+	    skb->len > ETH_FRAME_LEN + VLAN_HLEN) {
+		u8 why = 0;
+
+		if (!netif_running(netdev))
+			why |= BIT(0);
+		if (!netif_device_present(netdev))
+			why |= BIT(1);
+		if (!READ_ONCE(m->awdl_registered))
+			why |= BIT(2);
+		if (!READ_ONCE(m->awdl_present))
+			why |= BIT(3);
+		if (!READ_ONCE(m->awdl_enabled))
+			why |= BIT(4);
+		if (!mt_awdl_rf_ready(m))
+			why |= BIT(5);
+		if (!wtbl)
+			why |= BIT(6);
+		if (!READ_ONCE(m->data_ready))
+			why |= BIT(7);
+		if (skb->len < ETH_HLEN || skb->len > ETH_FRAME_LEN + VLAN_HLEN)
+			why |= BIT(8);
+		dev_warn_ratelimited(&m->pdev->dev,
+				     "AWDL_TX_DROP: why=%02x wtbl=%u chosen=%u present=%d absent=%d quota=%u enabled=%d len=%u\n",
+				     why, wtbl, chosen, READ_ONCE(m->awdl_present),
+				     READ_ONCE(m->awdl_absent), READ_ONCE(m->awdl_quota),
+				     READ_ONCE(m->awdl_enabled), skb->len);
 		goto drop;
+	}
 	if (tid > 7)
 		tid = 7;
 	/* The old fallback (2) overlaps the station association's reserved

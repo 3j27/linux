@@ -289,6 +289,11 @@ struct mt7932 {
 	u8 awdl_peer_station[MT_AWDL_PEERS];
 	u8 awdl_peer_wtbl[MT_AWDL_PEERS];
 	u8 awdl_peer_mac[MT_AWDL_PEERS][ETH_ALEN];
+	/* WTBL entry chosen for the AWDL BSS. The presence event reports its
+	 * own entry and often zero; keeping the selection separate prevents a
+	 * later event from silently disabling the transmit path. data_lock.
+	 */
+	u16 awdl_bss_wtbl;
 };
 
 /* What the connect worker reports once an attempt has its result. A move, a

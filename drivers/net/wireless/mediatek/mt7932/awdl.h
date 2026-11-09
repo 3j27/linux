@@ -108,6 +108,12 @@ static inline void mt7932_awdl_peer_body(u8 body[MT7932_AWDL_PEER_BODY_LEN],
 	body[0x01] = MT7932_AWDL_STATION_TYPE;
 	memcpy(body + 0x02, mac, ETH_ALEN);
 	body[0x0c] = bss;
+	/* `_awdlDataEngineSetupStaRecByBand` always ORs 0x0a into the peer's
+	 * PHY byte before masking it with the adapter's capability byte, and
+	 * `_cnmStaSendUpdateCmd` copies it to body[0x0d]. The peer's own flag
+	 * bits are not decoded here yet, so only the unconditional part is set.
+	 */
+	body[0x0d] = 0x0a;
 	/* Apple's AWDL peer setup sets these host fields before the update:
 	 * station+0x32c = 1, state = 2 (start), station+0x54 = 1,
 	 * station+0x5a = 3, and the local aggregation policy it derives is 3.

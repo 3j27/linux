@@ -226,6 +226,7 @@ static void mt_awdl_peer_body_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, body[0x01], (u8)MT7932_AWDL_STATION_TYPE);
 	KUNIT_EXPECT_MEMEQ(test, body + 0x02, mac, ETH_ALEN);
 	KUNIT_EXPECT_EQ(test, body[0x0c], (u8)MT7932_AWDL_BSS);
+	KUNIT_EXPECT_EQ(test, body[0x0d], (u8)0x0a);
 	KUNIT_EXPECT_EQ(test, body[0x12], (u8)1);
 	KUNIT_EXPECT_EQ(test, body[0x14], (u8)MT7932_AWDL_STATION_START);
 	KUNIT_EXPECT_EQ(test, body[0x17], (u8)1);
@@ -236,7 +237,7 @@ static void mt_awdl_peer_body_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, body[0x44], (u8)3);
 	KUNIT_EXPECT_EQ(test, body[0x7d], (u8)1);
 	for (unsigned int i = 0; i < sizeof(body); i++) {
-		bool known = i < 8 || i == 0x0c || i == 0x12 || i == 0x14 ||
+		bool known = i < 8 || (i >= 0x0c && i <= 0x0d) || i == 0x12 || i == 0x14 ||
 			i == 0x17 || (i >= 0x24 && i < 0x28) || i == 0x30 ||
 			i == 0x36 || i == 0x37 || i == 0x44 || i == 0x7d;
 		if (!known)
