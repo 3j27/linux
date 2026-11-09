@@ -803,6 +803,11 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 	body[0x2a] = 1;
 	body[0x30] = 0xfe;
 	body[0x32] = 0x4b;
+	/* body[0x3a] is the bandwidth selector the firmware logs as BM
+	 * (bss+0x78). The station negotiates 80 MHz, so use CMD_CBW_80MHZ=2;
+	 * a stale WTBL value used to land here by accident.
+	 */
+	body[0x3a] = 2;
 	memcpy(body + 0x4a, m->awdl_mac, ETH_ALEN);
 	body[0x5a] = 4;
 
