@@ -964,6 +964,14 @@ static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
 {
 	u8 body[12] = { MT7932_AWDL_BSS, 1, 5, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
 
+	/* body[3] is the BSS's own index in the vendor driver: _nicActivateNetwork
+	 * copies bss+0x50, which _cnmGetBssInfoAndInit fills with the BSS slot,
+	 * into the activation. Sending 0 there binds the second BSS to the
+	 * first BSS's own-MAC index, which is what the transmit descriptors
+	 * then contradict.
+	 */
+	body[3] = mt7932_awdl_omac;
+
 	body[1] = active;
 	body[10] = wtbl;
 	memcpy(body + 4, mac, ETH_ALEN);
