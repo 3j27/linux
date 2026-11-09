@@ -84,6 +84,17 @@ MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: choose a free one wh
  * frames at all" by transmitting with an entry the firmware demonstrably
  * services. Never for normal operation; 0 disables it.
  */
+/* Diagnostic-only: override the queue/TID value written into AWDL transmit
+ * descriptors. The vendor's `_awdlHardStartXmit` selects a queue explicitly
+ * (`_wlanSelectMultiPeerQueue`: station+0x612[user_pri] for a peer,
+ * bss+0x65f for BSS traffic) and stores it in the packet; this driver
+ * derives the field from cfg80211_classify8021d() instead. -1 keeps the
+ * classified value.
+ */
+int mt7932_awdl_force_ac = -1;
+module_param_named(awdl_force_ac, mt7932_awdl_force_ac, int, 0644);
+MODULE_PARM_DESC(awdl_force_ac, "Diagnostic: force this queue/TID value in AWDL TX descriptors (-1: classify)");
+
 int mt7932_awdl_probe_wtbl;
 module_param_named(awdl_probe_wtbl, mt7932_awdl_probe_wtbl, int, 0644);
 MODULE_PARM_DESC(awdl_probe_wtbl, "Diagnostic: force this WTBL entry in AWDL TX descriptors (0: off)");
@@ -616,6 +627,8 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	}
 	if (tid > 7)
 		tid = 7;
+	if (mt7932_awdl_force_ac >= 0 && mt7932_awdl_force_ac <= 7)
+		tid = mt7932_awdl_force_ac;
 	/* The old fallback (2) overlaps the station association's reserved
 	 * WTBL resources. A released host token with that header says nothing
 	 * about AWDL delivery. Refuse cross-BSS identity instead of publishing
