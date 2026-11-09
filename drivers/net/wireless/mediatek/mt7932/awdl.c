@@ -91,6 +91,15 @@ MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: choose a free one wh
  * derives the field from cfg80211_classify8021d() instead. -1 keeps the
  * classified value.
  */
+/* Diagnostic-only: override the queue/port byte in TXD word 0 (bits 16..23).
+ * The vendor derives that field from the TC resource table
+ * (_arTcResourceControl: port/queue pairs). This driver always writes 10.
+ * -1 keeps the built value.
+ */
+int mt7932_awdl_desc_qidx = -1;
+module_param_named(awdl_desc_qidx, mt7932_awdl_desc_qidx, int, 0644);
+MODULE_PARM_DESC(awdl_desc_qidx, "Diagnostic: force TXD word0 bits 16..23 (-1: built value)");
+
 int mt7932_awdl_force_ac = -1;
 module_param_named(awdl_force_ac, mt7932_awdl_force_ac, int, 0644);
 MODULE_PARM_DESC(awdl_force_ac, "Diagnostic: force this queue/TID value in AWDL TX descriptors (-1: classify)");
@@ -699,6 +708,8 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 		ret = mt7932_data_header(header, payload, skb->len,
 					 m->data_payloads_dma + 4096 * slot,
 					 slot, wtbl, own_mac, tid, false);
+	if (!ret && mt7932_awdl_desc_qidx >= 0 && mt7932_awdl_desc_qidx <= 0xff)
+		header[2] = mt7932_awdl_desc_qidx;
 	if (ret) {
 		spin_unlock_irqrestore(&m->data_lock, flags);
 		goto drop;
