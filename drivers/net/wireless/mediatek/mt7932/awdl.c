@@ -754,7 +754,12 @@ static int mt_awdl_tlv_cmd(struct mt7932 *m, u32 type, const void *payload,
 	put_unaligned_le16(0, body + 2);
 	put_unaligned_le32(type, body + 4);
 	put_unaligned_le32(length, body + 8);
-	memcpy(body + MT7932_AWDL_TLV_HDR, payload, length);
+	/* Past the four-byte prefix and the eight-byte element header. Copying
+	 * at MT7932_AWDL_TLV_HDR (8) wrote the payload over the length field
+	 * itself, so the firmware saw a length of 1 (the first payload byte)
+	 * and rejected the command: "expected 6, got 1".
+	 */
+	memcpy(body + MT7932_AWDL_TLV_OVERHEAD, payload, length);
 	/* Original command table, not the runtime one: with runtime set the
 	 * firmware's dispatcher reads a different body layout and answers
 	 * "Body length mismatch (expected N, got 1)" for every element. The
