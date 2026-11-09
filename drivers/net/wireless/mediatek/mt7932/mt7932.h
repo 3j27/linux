@@ -217,6 +217,10 @@ struct mt7932 {
 	bool data_live[512], data_token[512], data_retired[512];
 	struct mt7932_duplicate duplicates[17];
 	u64 tx_released, rx_ethernet;
+	/* TX completions whose token the host never allocated: frames the
+	 * firmware queued itself (AWDL PSFs, beacons). data_lock.
+	 */
+	u64 tx_fw_done;
 	/* Lifetime host RX observations, protected by response_lock. */
 	u64 rx_integrity, rx_malformed, rx_unsupported;
 	u64 rx_wrong_peer, rx_unprotected, rx_duplicate, rx_no_memory;

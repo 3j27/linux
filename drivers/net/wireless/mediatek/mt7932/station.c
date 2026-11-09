@@ -30,6 +30,7 @@ static const char mt_rx_stat_names[][ETH_GSTRING_LEN] = {
 	"rx_2ghz_records",
 	"rx_5ghz_records",
 	"rx_6ghz_records",
+	"tx_fw_completions",
 };
 
 static int mt_get_sset_count(struct net_device *netdev, int set)
@@ -54,7 +55,7 @@ static void mt_get_ethtool_stats(struct net_device *netdev,
 	unsigned long flags;
 	unsigned int i;
 
-	BUILD_BUG_ON(ARRAY_SIZE(mt_rx_stat_names) != 28);
+	BUILD_BUG_ON(ARRAY_SIZE(mt_rx_stat_names) != 29);
 	/* The interrupt thread alone writes these; a torn pass is harmless. */
 	data[9] = READ_ONCE(m->irq_passes);
 	data[10] = READ_ONCE(m->irq_unmasked_passes);
@@ -78,6 +79,7 @@ static void mt_get_ethtool_stats(struct net_device *netdev,
 	if (READ_ONCE(m->data_ready)) {
 		spin_lock_irqsave(&m->data_lock, flags);
 		data[21] = m->tx_free_events;
+		data[28] = m->tx_fw_done;
 		for (i = 0; i < ARRAY_SIZE(m->rx_band_records); i++)
 			data[25 + i] = m->rx_band_records[i];
 		spin_unlock_irqrestore(&m->data_lock, flags);
