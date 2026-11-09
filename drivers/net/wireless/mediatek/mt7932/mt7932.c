@@ -41,6 +41,22 @@ static int mt_initialize(struct mt7932 *m);
 static int mt_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 static void mt_shutdown(struct pci_dev *pdev);
 
+/* Firmware-log investigation: the IZUBA firmware emits periodic
+ * unsolicited events whose bodies the normal line truncates to 48 bytes.
+ * event_hex selects one EID (0 for every EID, -1 for none) and dumps the
+ * whole body in hex, which is how the log record layout was read out.
+ */
+int mt7932_event_hex = -1;
+module_param_named(event_hex, mt7932_event_hex, int, 0644);
+MODULE_PARM_DESC(event_hex, "Dump full unsolicited event bodies (EID, 0=all, -1=off)");
+
+/* The station's per-frame records are ~500 bytes and flood the ring; the
+ * AWDL dispatcher, sync and status records are small. 0 keeps every body.
+ */
+int mt7932_event_max;
+module_param_named(event_max, mt7932_event_max, int, 0644);
+MODULE_PARM_DESC(event_max, "Only dump event bodies up to this length (0: no limit)");
+
 bool mt_rf_allowed(struct mt7932 *m)
 {
 	return !READ_ONCE(m->stopping) && READ_ONCE(m->rf_ready) && !READ_ONCE(m->reg_pending) &&
@@ -231,6 +247,12 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		 * firmware they are the only unsolicited words it says; a
 		 * periodic event nobody has decoded is worth a body.
 		 */
+		if (mt7932_event_hex >= 0 &&
+		    (!mt7932_event_hex || event.eid == mt7932_event_hex) &&
+		    (!mt7932_event_max || event.length <= mt7932_event_max))
+			print_hex_dump(KERN_INFO, "mt7932evt ", DUMP_PREFIX_OFFSET,
+				       16, 1, (const u8 *)event.packet + 36,
+				       event.length, false);
 		dev_dbg_ratelimited(&m->pdev->dev,
 				    "event eid=%02x seq=%u option=%02x len=%zu body %*ph\n",
 				    event.eid, event.seq, event.option, event.length,
