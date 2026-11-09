@@ -113,6 +113,22 @@ MODULE_PARM_DESC(awdl_tx_ring, "Diagnostic: TX ring for AWDL data (0: TX0)");
  * driver writes 0x10 for every frame; the vendor derives the queue per BSS
  * and per peer. -1 keeps the built value.
  */
+/* The vendor's CID 0x12 body carries the BSS channel as a u16 taken from
+ * bss+0x48 (`_nicUpdateBss`: movzwl 0x48(%r15) -> body[0x28]). This driver
+ * wrote a channel at body[0x0a], which in the vendor body is part of the
+ * copied BSS blob (bss+0x2a), and left 0x28 zero. The firmware then logged
+ * `GrantPriv ... C,0` and `PSF/AWSF abort by reason[0x2]`: no channel for
+ * the AWDL BSS's channel request. Both the offset and the encoded value are
+ * runtime-tunable so one boot can test the plausible encodings.
+ */
+int mt7932_awdl_bss_chan_off = 0x28;
+module_param_named(awdl_bss_chan_off, mt7932_awdl_bss_chan_off, int, 0644);
+MODULE_PARM_DESC(awdl_bss_chan_off, "Offset of the BSS channel in CID 0x12 (default 0x28, -1 disables)");
+
+int mt7932_awdl_bss_chan = -1;
+module_param_named(awdl_bss_chan, mt7932_awdl_bss_chan, int, 0644);
+MODULE_PARM_DESC(awdl_bss_chan, "Encoded BSS channel value (-1: the associated channel)");
+
 int mt7932_awdl_txd_qidx = -1;
 module_param_named(awdl_txd_qidx, mt7932_awdl_txd_qidx, int, 0644);
 MODULE_PARM_DESC(awdl_txd_qidx, "Diagnostic: force MT_TXD0_Q_IDX (-1: built value 0x10)");
@@ -996,6 +1012,14 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 	 * availability windows, so it neither hears nor emits AWDL action frames.
 	 */
 	body[0x0a] = m->connect_channel;
+	/* Vendor layout: u16 BSS channel at 0x28 (bss+0x48). */
+	if (mt7932_awdl_bss_chan_off >= 4 &&
+	    mt7932_awdl_bss_chan_off + 2 <= MT7932_AWDL_BSSINFO_LEN) {
+		u16 chan = mt7932_awdl_bss_chan >= 0 ?
+			   (u16)mt7932_awdl_bss_chan : m->connect_channel;
+
+		put_unaligned_le16(chan, body + mt7932_awdl_bss_chan_off);
+	}
 	/* Field offsets decoded from _nicUpdateBss (the 0x70-byte BSS blob is
 	 * copied from host bss+0x24 into body+4) and from the values _awdlDevInit
 	 * stores: the interface address lands at blob+0x26 (body+0x4a), the
