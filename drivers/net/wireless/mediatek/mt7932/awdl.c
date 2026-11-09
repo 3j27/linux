@@ -96,6 +96,16 @@ MODULE_PARM_DESC(awdl_wtbl, "WTBL entry of the AWDL BSS (0: choose a free one wh
  * (_arTcResourceControl: port/queue pairs). This driver always writes 10.
  * -1 keeps the built value.
  */
+/* Diagnostic-only: publish AWDL data frames to this TX ring instead of TX0.
+ * The vendor binds a queue per BSS/peer and the hardware ring follows that
+ * queue; this driver's clean/kick/token bookkeeping is TX0-only, so a
+ * non-zero value here is a bounded experiment, not a supported mode: the
+ * chosen ring is kicked directly and its slots are not retired.
+ */
+int mt7932_awdl_tx_ring;
+module_param_named(awdl_tx_ring, mt7932_awdl_tx_ring, int, 0644);
+MODULE_PARM_DESC(awdl_tx_ring, "Diagnostic: TX ring for AWDL data (0: TX0)");
+
 int mt7932_awdl_desc_qidx = -1;
 module_param_named(awdl_desc_qidx, mt7932_awdl_desc_qidx, int, 0644);
 MODULE_PARM_DESC(awdl_desc_qidx, "Diagnostic: force TXD word0 bits 16..23 (-1: built value)");
@@ -568,8 +578,13 @@ static int mt_awdl_net_stop(struct net_device *netdev)
 static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	struct mt7932 *m = *(struct mt7932 **)netdev_priv(netdev);
-	struct mt7932_ring *q = &m->tx[0];
+	unsigned int ring = READ_ONCE(mt7932_awdl_tx_ring);
+	struct mt7932_ring *q;
 	struct mt7932_desc *desc;
+
+	if (ring > 16)
+		ring = 0;
+	q = &m->tx[ring];
 	unsigned int tid = cfg80211_classify8021d(skb, NULL);
 	unsigned int own_mac = READ_ONCE(mt7932_awdl_omac);
 	u16 wtbl = READ_ONCE(m->awdl_wtbl);
@@ -735,9 +750,16 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 	if (!mt_awdl_tx_allowed(m) || m->data_live[q->head] ||
 	    q->queued >= q->count - 1)
 		netif_stop_queue(netdev);
-	if (!netdev_xmit_more() || netif_queue_stopped(netdev) ||
-	    m->data_unkicked >= MT7932_TX_BATCH)
+	if (ring) {
+		/* Diagnostic path: kick the chosen ring directly; the shared
+		 * bookkeeping only knows TX0.
+		 */
+		dma_wmb();
+		mt_write(m, q->reg + 8, q->head);
+	} else if (!netdev_xmit_more() || netif_queue_stopped(netdev) ||
+		   m->data_unkicked >= MT7932_TX_BATCH) {
 		mt_data_kick_locked(m);
+	}
 	spin_unlock_irqrestore(&m->data_lock, flags);
 	netdev->stats.tx_packets++;
 	netdev->stats.tx_bytes += skb->len;
