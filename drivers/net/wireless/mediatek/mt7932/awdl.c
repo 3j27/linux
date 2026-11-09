@@ -106,6 +106,17 @@ int mt7932_awdl_tx_ring;
 module_param_named(awdl_tx_ring, mt7932_awdl_tx_ring, int, 0644);
 MODULE_PARM_DESC(awdl_tx_ring, "Diagnostic: TX ring for AWDL data (0: TX0)");
 
+/* Diagnostic-only: override MT_TXD0_Q_IDX (bits 31..25) in AWDL transmit
+ * descriptors. Upstream mt76 (mt76_connac2_mac.h) defines that field as
+ * MT_TXD0_Q_IDX, with MT_LMAC_AC00..03 = 0..3, MT_LMAC_ALTX0 = 0x10,
+ * MT_LMAC_BMC0 = 0x11, MT_LMAC_BCN0 = 0x12 and MT_LMAC_PSMP0 = 0x13. This
+ * driver writes 0x10 for every frame; the vendor derives the queue per BSS
+ * and per peer. -1 keeps the built value.
+ */
+int mt7932_awdl_txd_qidx = -1;
+module_param_named(awdl_txd_qidx, mt7932_awdl_txd_qidx, int, 0644);
+MODULE_PARM_DESC(awdl_txd_qidx, "Diagnostic: force MT_TXD0_Q_IDX (-1: built value 0x10)");
+
 int mt7932_awdl_desc_qidx = -1;
 module_param_named(awdl_desc_qidx, mt7932_awdl_desc_qidx, int, 0644);
 MODULE_PARM_DESC(awdl_desc_qidx, "Diagnostic: force TXD word0 bits 16..23 (-1: built value)");
@@ -725,6 +736,13 @@ static netdev_tx_t mt_awdl_xmit(struct sk_buff *skb, struct net_device *netdev)
 					 slot, wtbl, own_mac, tid, false);
 	if (!ret && mt7932_awdl_desc_qidx >= 0 && mt7932_awdl_desc_qidx <= 0xff)
 		header[2] = mt7932_awdl_desc_qidx;
+	if (!ret && mt7932_awdl_txd_qidx >= 0) {
+		u32 w0 = get_unaligned_le32(header);
+
+		w0 = (w0 & ~(0x7fU << 25)) |
+		     ((u32)mt7932_awdl_txd_qidx << 25);
+		put_unaligned_le32(w0, header);
+	}
 	if (ret) {
 		spin_unlock_irqrestore(&m->data_lock, flags);
 		goto drop;
