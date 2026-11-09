@@ -1173,5 +1173,15 @@ int mt_deauth(struct wiphy *wiphy, struct net_device *netdev,
 int mt_change_interface(struct wiphy *wiphy, struct net_device *netdev,
 			       enum nl80211_iftype type, struct vif_params *params)
 {
-	return type == NL80211_IFTYPE_STATION ? 0 : -EOPNOTSUPP;
+	struct mt7932 *m = mt_from_wiphy(wiphy);
+
+	/* This driver owns exactly one station interface. Accepting a type
+	 * change on any other netdev -- the AWDL interface, or a request from
+	 * a userspace that lost track of it -- lets cfg80211 rewrite state
+	 * the driver never initialised, and it crashes in
+	 * cfg80211_change_iface(). Refusing is the honest answer.
+	 */
+	if (type != NL80211_IFTYPE_STATION || netdev != m->netdev)
+		return -EOPNOTSUPP;
+	return 0;
 }
