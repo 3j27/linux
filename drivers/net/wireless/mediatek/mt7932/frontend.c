@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "mt7932.h"
+#include "awdl.h"
 
 static void mt_scan_finish_work(struct work_struct *work);
 static void mt_scan_timeout_work(struct work_struct *work);
@@ -150,6 +151,7 @@ static void mt_scan_retire_wait(struct mt7932 *m, unsigned long timeout)
 void mt_scan_settle_retired(struct mt7932 *m)
 {
 	unsigned long deadline = jiffies + msecs_to_jiffies(2000);
+	unsigned long flags;
 	long left;
 
 	while (READ_ONCE(m->retired_scan_seq) && !READ_ONCE(m->scan_request) &&
@@ -157,6 +159,25 @@ void mt_scan_settle_retired(struct mt7932 *m)
 		left = (long)(deadline - jiffies);
 		if (left <= 0 || !wait_for_completion_timeout(&m->scan_done, left))
 			break;
+	}
+	/* This firmware does not always send the cancelled batch's done
+	 * event. The sequence then stays reserved forever and every reconnect
+	 * is refused with EBUSY, which is how a lost association during an
+	 * AWDL window turned into a station that only a reboot could restore.
+	 * The batch is cancelled and no scan is in flight here, so release
+	 * the reservation rather than deadlocking the link.
+	 */
+	if (READ_ONCE(m->retired_scan_seq) && !READ_ONCE(m->scan_request) &&
+	    !READ_ONCE(m->stopping) && mt_rf_allowed(m)) {
+		spin_lock_irqsave(&m->response_lock, flags);
+		if (m->retired_scan_seq && !m->scan_request && !m->stopping) {
+			dev_warn_ratelimited(&m->pdev->dev,
+					     "retired scan %u never completed; releasing it\n",
+					     m->retired_scan_seq);
+			m->retired_scan_seq = 0;
+			complete(&m->scan_done);
+		}
+		spin_unlock_irqrestore(&m->response_lock, flags);
 	}
 }
 
@@ -171,6 +192,13 @@ int mt_scan_quiesce(struct mt7932 *m)
 	if (READ_ONCE(m->scan_request) || READ_ONCE(m->retired_scan_seq))
 		wait_for_completion_timeout(&m->scan_done, msecs_to_jiffies(5000));
 	mt_scan_retire_wait(m, msecs_to_jiffies(2000));
+	/* The done event for a cancelled batch is not guaranteed on this
+	 * firmware. Leaving the sequence reserved made the disconnect path
+	 * declare the link failed and refuse every later scan/connect until a
+	 * reboot. With no scan in flight, release it here as well.
+	 */
+	if (READ_ONCE(m->retired_scan_seq))
+		mt_scan_settle_retired(m);
 	return READ_ONCE(m->retired_scan_seq) ? -EBUSY : 0;
 }
 
@@ -412,6 +440,16 @@ int mt_scan(struct wiphy *wiphy, struct cfg80211_scan_request *request)
 		    channel->flags & (IEEE80211_CHAN_DISABLED | IEEE80211_CHAN_NO_20MHZ))
 			return -EINVAL;
 	}
+	/* A batch that was cancelled leaves its sequence reserved until the
+	 * firmware's done event arrives, and this firmware sometimes never
+	 * sends it. The connect and address-change paths wait out that event
+	 * and release the reservation; without the same wait here a single
+	 * lost event made every later scan fail with EIO, so iwd could not
+	 * even list networks again. Nothing is in flight when scan_request
+	 * is NULL, so the wait is bounded and cannot steal a live scan.
+	 */
+	if (READ_ONCE(m->retired_scan_seq) && !READ_ONCE(m->scan_request))
+		mt_scan_settle_retired(m);
 	mutex_lock(&m->command_mutex);
 	spin_lock_irqsave(&m->response_lock, flags);
 	ret = mt_scan_admit(m);
@@ -640,6 +678,11 @@ int mt_register_interface(struct mt7932 *m)
 	init_completion(&m->scan_done);
 	m->peer_alloc = BIT(0) | BIT(19);
 	INIT_DELAYED_WORK(&m->scan_timeout_work, mt_scan_timeout_work);
+	if (IS_ENABLED(CONFIG_MT7932_AWDL)) {
+		INIT_WORK(&m->awdl_attach_work, mt_awdl_attach_work);
+		INIT_WORK(&m->awdl_teardown_work, mt_awdl_teardown_work);
+		INIT_DELAYED_WORK(&m->awdl_timeout, mt_awdl_timeout);
+	}
 	m->netdev = netdev;
 	ret = register_netdev(netdev);
 	if (ret) {
@@ -715,12 +758,31 @@ void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 	}
 	if (!READ_ONCE(m->rf_ready))
 		return;
+	/* Management frames never reach the data path, so this is the only
+	 * place a received AWDL action frame can be seen. See awdl.c.
+	 */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) && READ_ONCE(mt7932_awdl_capture) &&
+	    !frame.translated &&
+	    (frame.frame_control & IEEE80211_FCTL_FTYPE) == IEEE80211_FTYPE_MGMT)
+		mt_awdl_capture_action(m, &frame);
 	channel = ieee80211_get_channel(m->wiphy,
 					ieee80211_channel_to_frequency(frame.channel, frame.band));
 	if (!channel || (channel->flags & IEEE80211_CHAN_DISABLED))
 		return;
 	if (frame.translated) {
 		mt_data_receive(m, &frame);
+		return;
+	}
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) &&
+	    mt7932_awdl_native_header(frame.data, frame.length)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&m->response_lock, flags);
+		if (m->awdl_registered && m->awdl_present && m->awdl_enabled &&
+		    (is_multicast_ether_addr(frame.data + 4) ||
+		     ether_addr_equal(frame.data + 4, m->awdl_mac)))
+			mt_awdl_receive(m, &frame);
+		spin_unlock_irqrestore(&m->response_lock, flags);
 		return;
 	}
 	if (!frame.signal_valid || !mt7932_rx_beacon(&frame))

@@ -37,6 +37,13 @@
 #define IRQ_MASK 0xe2c8000d
 #define DONE BIT(31)
 #define STRIDE 8192
+/*
+ * TX0 descriptors published per doorbell. The stack marks a packet that has
+ * another one right behind it with netdev_xmit_more(), so the TX0 doorbell is
+ * rung once per burst instead of once per packet, and at least every
+ * MT7932_TX_BATCH packets so that the device starts on a long burst early.
+ */
+#define MT7932_TX_BATCH 64
 #define RX_STRIDE ALIGN(MT7932_RX_CAPACITY, 64)
 
 DECLARE_EWMA(mt7932_signal, 4, 4)
@@ -210,6 +217,10 @@ struct mt7932 {
 	bool data_live[512], data_token[512], data_retired[512];
 	struct mt7932_duplicate duplicates[17];
 	u64 tx_released, rx_ethernet;
+	/* TX completions whose token the host never allocated: frames the
+	 * firmware queued itself (AWDL PSFs, beacons). data_lock.
+	 */
+	u64 tx_unmatched_tokens;
 	/* Lifetime host RX observations, protected by response_lock. */
 	u64 rx_integrity, rx_malformed, rx_unsupported;
 	u64 rx_wrong_peer, rx_unprotected, rx_duplicate, rx_no_memory;
@@ -228,9 +239,61 @@ struct mt7932 {
 	bool data_ready;
 	bool bss_absent;
 	u8 bss_quota;
+	/* AWDL (firmware BSS 1, see awdl.h). Data-path gates (absent, quota,
+	 * WTBL entry, present, registered) are owned by data_lock, mirroring
+	 * the station BSS; lifecycle pointers and flags are owned by
+	 * response_lock; awdl_enabled is written under command_mutex. Contexts
+	 * that must not take the owning lock read these with READ_ONCE().
+	 */
+	bool awdl_registered, awdl_present, awdl_absent;
+	bool awdl_destroying, awdl_pending, awdl_attaching;
+	bool awdl_active, awdl_enabled;
+	u8 awdl_quota;
+	u16 awdl_wtbl, awdl_tx_seq;
+	/* Received AWDL action frames, newest last, for the peer work. Filled
+	 * from the RX path under response_lock and read only through the
+	 * mt7932_awdl_actions debugfs file.
+	 */
+#define MT_AWDL_CAPTURE_SLOTS 8
+#define MT_AWDL_CAPTURE_BYTES 512
+/* Peer station records for the firmware's AWDL BSS (awdl.h). */
+#define MT_AWDL_PEERS 4
+	u8 awdl_capture_data[MT_AWDL_CAPTURE_SLOTS][MT_AWDL_CAPTURE_BYTES];
+	u16 awdl_capture_len[MT_AWDL_CAPTURE_SLOTS];
+	u16 awdl_capture_fc[MT_AWDL_CAPTURE_SLOTS];
+	u16 awdl_capture_wtbl[MT_AWDL_CAPTURE_SLOTS];
+	s8 awdl_capture_signal[MT_AWDL_CAPTURE_SLOTS];
+	u8 awdl_capture_channel[MT_AWDL_CAPTURE_SLOTS];
+	u8 awdl_capture_next;
+	u32 awdl_capture_total;
+	struct mt7932_duplicate awdl_duplicates[17];
+	/* TX0 slots carrying AWDL frames; data_lock. */
+	DECLARE_BITMAP(data_awdl, 512);
+	u64 awdl_tx_bytes;
+	u32 awdl_tx_packets;
+	char awdl_ifname[IFNAMSIZ];
+	u8 awdl_mac[ETH_ALEN];
+	struct net_device *awdl_netdev;
+	struct wireless_dev *awdl_wdev;
+	struct work_struct awdl_attach_work, awdl_teardown_work;
+	struct delayed_work awdl_timeout;
 	u32 irq_mask;
 	void *ipc, *aux;
 	dma_addr_t ipc_dma, aux_dma;
+	/* AWDL peer station records (see awdl.h). Appended last so the
+	 * diagnostic helper's hard-coded offsets for the fields above stay
+	 * valid. Protected by response_lock, which the transmit path and the
+	 * receive demultiplexer already hold when they read them.
+	 */
+	u8 awdl_peer_count;
+	u8 awdl_peer_station[MT_AWDL_PEERS];
+	u8 awdl_peer_wtbl[MT_AWDL_PEERS];
+	u8 awdl_peer_mac[MT_AWDL_PEERS][ETH_ALEN];
+	/* WTBL entry chosen for the AWDL BSS. The presence event reports its
+	 * own entry and often zero; keeping the selection separate prevents a
+	 * later event from silently disabling the transmit path. data_lock.
+	 */
+	u16 awdl_bss_wtbl;
 };
 
 /* What the connect worker reports once an attempt has its result. A move, a
@@ -291,6 +354,9 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 		      const void *payload, size_t length);
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length);
+int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool runtime,
+		   bool set, bool wait, bool force_reply, const void *payload,
+		   size_t length, int resp_eid);
 void mt_transport_snapshot(struct mt7932 *m);
 int mt_recovery_gate(struct mt7932 *m);
 int mt_cal_procedure(struct mt7932 *m, struct mt7932_cal_piece *pieces,
@@ -344,5 +410,32 @@ int mt_set_power_mgmt(struct wiphy *wiphy, struct net_device *netdev,
 		      bool enabled, int timeout);
 void mt_power_work(struct work_struct *work);
 int mt_power_init(struct mt7932 *m);
+
+/* AWDL; see awdl.h and vendor.h. The works are initialized by
+ * mt_register_interface() and joined by mt_stop_host() and mt_remove().
+ */
+extern const struct net_device_ops mt_awdl_net_ops;
+extern int mt7932_awdl_trace;
+extern int mt7932_awdl_wtbl;
+bool mt7932_awdl_enabled(void);
+extern const struct wiphy_vendor_command mt7932_vendor_cmds[3];
+bool mt_awdl_tx_allowed(const struct mt7932 *m);
+int mt_awdl_add_vif(struct wiphy *wiphy, const char *name);
+int mt_awdl_del_vif(struct wiphy *wiphy, struct wireless_dev *wdev);
+int mt_awdl_session(struct mt7932 *m, bool enable);
+int mt_awdl_set_bssid(struct mt7932 *m, const u8 *mac);
+int mt_awdl_channel_list(struct mt7932 *m);
+int mt_awdl_data_cmd(struct mt7932 *m, u8 selector, const void *data, size_t length);
+int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN]);
+int mt_awdl_state(struct mt7932 *m, u8 selector, void **reply, size_t *length);
+int mt_awdl_election(struct mt7932 *m, u32 metric, s8 rssi_threshold);
+void mt_awdl_presence(struct mt7932 *m, const struct mt7932_event *event);
+void mt_awdl_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame);
+void mt_awdl_capture_action(struct mt7932 *m, const struct mt7932_rx_frame *frame);
+void mt_awdl_debugfs_init(struct mt7932 *m);
+extern int mt7932_awdl_capture;
+void mt_awdl_attach_work(struct work_struct *work);
+void mt_awdl_teardown_work(struct work_struct *work);
+void mt_awdl_timeout(struct work_struct *work);
 
 #endif

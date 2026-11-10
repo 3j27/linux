@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "mt7932.h"
+#include "awdl.h"
 
 static bool mt_bss_tx_allowed(struct mt7932 *m);
 static void mt_bss_tx_account(struct mt7932 *m);
@@ -33,15 +34,11 @@ void mt_data_clean_locked(struct mt7932 *m)
 	if (READ_ONCE(m->connected) && mt_rf_allowed(m) && mt_bss_tx_allowed(m) &&
 	    !m->data_live[q->head] && q->queued < q->count - 1)
 		netif_wake_queue(m->netdev);
+	/* The AWDL BSS shares TX0; its queue follows the same admission. */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) && m->awdl_registered && m->awdl_present &&
+	    mt_awdl_tx_allowed(m) && !m->data_live[q->head] && q->queued < q->count - 1)
+		netif_wake_queue(m->awdl_netdev);
 }
-
-/*
- * The stack marks a packet that has another one right behind it with
- * netdev_xmit_more(), so the TX0 doorbell is rung once per burst instead of
- * once per packet, and at least every MT7932_TX_BATCH packets so that the
- * device starts on a long burst early.
- */
-#define MT7932_TX_BATCH 64
 
 /* data_lock held: hand every published TX0 descriptor to the device. */
 void mt_data_kick_locked(struct mt7932 *m)
@@ -120,13 +117,25 @@ void mt_data_complete(struct mt7932 *m, const u8 *packet, size_t length)
 	mt_data_clean_locked(m);
 	for (i = 0; i < count; i++) {
 		unsigned int token = tokens[i];
+		bool awdl = false;
 
-		if (token >= ARRAY_SIZE(m->data_live) || !m->data_live[token] || !m->data_token[token])
+		if (token >= ARRAY_SIZE(m->data_live) || !m->data_live[token] || !m->data_token[token]) {
+			/* No currently owned host buffer matches this token. This
+			 * may also be a stale or duplicate release; it establishes
+			 * neither firmware origin nor over-air transmission.
+			 */
+			m->tx_unmatched_tokens++;
 			continue;
+		}
+		if (IS_ENABLED(CONFIG_MT7932_AWDL))
+			awdl = test_and_clear_bit(token, m->data_awdl);
 		m->data_token[token] = false;
 		m->tx_released++;
 		if (m->data_retired[token])
 			m->data_live[token] = false;
+		if (awdl && READ_ONCE(mt7932_awdl_trace))
+			dev_info_ratelimited(&m->pdev->dev, "awdl tx buffer released: token=%u (delivery unverified)\n",
+					     token);
 	}
 	mt_data_clean_locked(m);
 	spin_unlock_irqrestore(&m->data_lock, flags);
@@ -237,6 +246,44 @@ void mt_data_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 		return;
 	/* Serialize peer identity and accounting with association retirement. */
 	spin_lock_irqsave(&m->response_lock, flags);
+	/* AWDL frames ride TX0/RX with the AWDL BSS's own WTBL entry; the
+	 * station gate below would drop them. The entry is what a presence
+	 * event reported or what the module parameter asks for; where no
+	 * entry is known, a frame carrying the AWDL data envelope is the
+	 * AWDL BSS's. Data-gate fields are owned by data_lock and read here
+	 * without it, single-word and harmless when one pass stale.
+	 */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) && READ_ONCE(m->awdl_registered) &&
+	    READ_ONCE(m->awdl_present)) {
+		u16 wtbl = READ_ONCE(m->awdl_wtbl);
+		bool have_mac = !is_zero_ether_addr(m->awdl_mac);
+		bool peer = false;
+		unsigned int i;
+
+		if (!wtbl && mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0xff)
+			wtbl = mt7932_awdl_wtbl;
+		/* The firmware translates an AWDL peer's data frames with that
+		 * peer's own WTBL, not the BSS's, so the BSS entry alone misses
+		 * them and they fall into the station gate below. The AWDL
+		 * interface address is the other stable identity: a translated
+		 * Ethernet frame addressed to or from it belongs to awdl0 even
+		 * when the descriptor names the peer's entry.
+		 */
+		for (i = 0; i < MT_AWDL_PEERS; i++)
+			if (READ_ONCE(m->awdl_peer_wtbl[i]) &&
+			    frame->wtbl == READ_ONCE(m->awdl_peer_wtbl[i])) {
+				peer = true;
+				break;
+			}
+		if ((wtbl && frame->wtbl == wtbl) || peer ||
+		    (frame->translated && have_mac &&
+		     (ether_addr_equal(frame->data, m->awdl_mac) ||
+		      ether_addr_equal(frame->data + ETH_ALEN, m->awdl_mac))) ||
+		    mt7932_awdl_payload(frame->data, frame->length)) {
+			mt_awdl_receive(m, frame);
+			goto unlock;
+		}
+	}
 	if (!m->connected || !m->peer_valid || m->disconnecting || m->stopping)
 		goto unlock;
 	if ((frame->unicast && frame->wtbl != m->peer_wtbl) ||

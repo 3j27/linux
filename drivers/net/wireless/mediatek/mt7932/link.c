@@ -261,6 +261,14 @@ void mt_link_event(struct mt7932 *m, const struct mt7932_event *event)
 		}
 		m->peer_wtbl = body[21];
 		m->peer_valid = true;
+		/* The firmware's assigned IDs, logged so a diagnostic can pick a
+		 * WTBL entry that is not part of this association.
+		 */
+		dev_info(&m->pdev->dev,
+			 "ASSOC_RESOURCES: station=%u,%u wtbl=%u,%u,%u,%u peer_wtbl=%u\n",
+			 m->peer_ids.station[0], m->peer_ids.station[1],
+			 m->peer_ids.wtbl[0], m->peer_ids.wtbl[1],
+			 m->peer_ids.wtbl[2], m->peer_ids.wtbl[3], m->peer_wtbl);
 		/* HOST decoder confirms the RSN suite namespace, not request enum10. */
 		m->event_cipher = get_unaligned_le32(body + 48);
 		dev_dbg(&m->pdev->dev, "ASSOCIATED: peer=%u station=%u cipher-raw=%u\n",
@@ -1088,6 +1096,18 @@ void mt_disconnect_work(struct work_struct *work)
 		mt_reg_apply_deferred_locked(m);
 	}
 	spin_unlock_irqrestore(&m->response_lock, flags);
+#if IS_ENABLED(CONFIG_MT7932_AWDL)
+	/* An AWDL session that outlives its station link holds the radio, and
+	 * the reconnect then times out and latches link_failed until a reboot.
+	 * Take the session down with the link; userspace can bring it back
+	 * once the station has rejoined.
+	 */
+	if (READ_ONCE(m->awdl_enabled) && !READ_ONCE(m->stopping)) {
+		mutex_lock(&m->command_mutex);
+		mt_awdl_session(m, false);
+		mutex_unlock(&m->command_mutex);
+	}
+#endif
 	dev_dbg(&m->pdev->dev, "DISCONNECTED: teardown=%d local=%u\n", ret, local);
 }
 
@@ -1161,5 +1181,15 @@ int mt_deauth(struct wiphy *wiphy, struct net_device *netdev,
 int mt_change_interface(struct wiphy *wiphy, struct net_device *netdev,
 			       enum nl80211_iftype type, struct vif_params *params)
 {
-	return type == NL80211_IFTYPE_STATION ? 0 : -EOPNOTSUPP;
+	struct mt7932 *m = mt_from_wiphy(wiphy);
+
+	/* This driver owns exactly one station interface. Accepting a type
+	 * change on any other netdev -- the AWDL interface, or a request from
+	 * a userspace that lost track of it -- lets cfg80211 rewrite state
+	 * the driver never initialised, and it crashes in
+	 * cfg80211_change_iface(). Refusing is the honest answer.
+	 */
+	if (type != NL80211_IFTYPE_STATION || netdev != m->netdev)
+		return -EOPNOTSUPP;
+	return 0;
 }

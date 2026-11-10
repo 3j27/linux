@@ -41,6 +41,22 @@ static int mt_initialize(struct mt7932 *m);
 static int mt_probe(struct pci_dev *pdev, const struct pci_device_id *id);
 static void mt_shutdown(struct pci_dev *pdev);
 
+/* Firmware-log investigation: the IZUBA firmware emits periodic
+ * unsolicited events whose bodies the normal line truncates to 48 bytes.
+ * event_hex selects one EID (0 for every EID, -1 for none) and dumps the
+ * whole body in hex, which is how the log record layout was read out.
+ */
+int mt7932_event_hex = -1;
+module_param_named(event_hex, mt7932_event_hex, int, 0644);
+MODULE_PARM_DESC(event_hex, "Dump full unsolicited event bodies (EID, 0=all, -1=off)");
+
+/* The station's per-frame records are ~500 bytes and flood the ring; the
+ * AWDL dispatcher, sync and status records are small. 0 keeps every body.
+ */
+int mt7932_event_max;
+module_param_named(event_max, mt7932_event_max, int, 0644);
+MODULE_PARM_DESC(event_max, "Only dump event bodies up to this length (0: no limit)");
+
 bool mt_rf_allowed(struct mt7932 *m)
 {
 	return !READ_ONCE(m->stopping) && READ_ONCE(m->rf_ready) && !READ_ONCE(m->reg_pending) &&
@@ -162,6 +178,22 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		goto unlock;
 	}
 	if (event.eid == 0x11) {
+		const u8 *body = event.packet + 36;
+
+		/* Both BSSs answer with EID 0x11; each handler checks its
+		 * own BSS index in the body and ignores the other's, so a
+		 * report for a BSS the driver is not driving is dropped by
+		 * both. Log it here, where every index is seen: while the
+		 * AWDL BSS is being brought up, this is the only thing that
+		 * says the firmware took the activation.
+		 */
+		if (event.length >= 41)
+			dev_dbg_ratelimited(&m->pdev->dev,
+					    "BSS_REPORT: bss=%u absent=%u quota=%u wtbl=%u\n",
+					    body[0], body[1], body[2],
+					    get_unaligned_le16(body + 3));
+		if (IS_ENABLED(CONFIG_MT7932_AWDL))
+			mt_awdl_presence(m, &event);
 		mt_bss_presence(m, &event);
 		goto unlock;
 	}
@@ -210,8 +242,22 @@ static void mt_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		m->reply_length = event.length;
 		complete(&m->response);
 	} else {
-		dev_dbg_ratelimited(&m->pdev->dev, "event eid=%02x seq=%u option=%02x len=%zu\n",
-				     event.eid, event.seq, event.option, event.length);
+		/* The body goes out with the line: the events that answer no
+		 * command are the firmware's own reports, and on this
+		 * firmware they are the only unsolicited words it says; a
+		 * periodic event nobody has decoded is worth a body.
+		 */
+		if (mt7932_event_hex >= 0 &&
+		    (!mt7932_event_hex || event.eid == mt7932_event_hex) &&
+		    (!mt7932_event_max || event.length <= mt7932_event_max))
+			print_hex_dump(KERN_INFO, "mt7932evt ", DUMP_PREFIX_OFFSET,
+				       16, 1, (const u8 *)event.packet + 36,
+				       event.length, false);
+		dev_dbg_ratelimited(&m->pdev->dev,
+				    "event eid=%02x seq=%u option=%02x len=%zu body %*ph\n",
+				    event.eid, event.seq, event.option, event.length,
+				    (int)min_t(size_t, event.length, 48),
+				    (const u8 *)event.packet + 36);
 	}
 unlock:
 	spin_unlock_irqrestore(&m->response_lock, flags);
@@ -264,11 +310,26 @@ static void mt_rx_drain(struct mt7932 *m, struct mt7932_ring *q)
 static irqreturn_t mt_irq(int irq, void *data)
 {
 	struct mt7932 *m = data;
+	u32 raw;
 
 	if (!READ_ONCE(m->running))
 		return IRQ_NONE;
-	if (!(mt_read(m, W + 0x200) & m->irq_mask))
+	raw = mt_read(m, W + 0x200);
+	if (!raw)
 		return IRQ_NONE;
+	if (!(raw & m->irq_mask)) {
+		/* A cause outside the enabled mask latched in the status
+		 * register, and nothing in the thread acknowledges it: only
+		 * raw & irq_mask is ever written back. This device stops
+		 * announcing new causes while one stays pending, so a single
+		 * unexpected bit silenced the line until the next boot.
+		 * Acknowledge it here; there is nothing to service for it.
+		 */
+		m->irq_unmasked |= raw;
+		m->irq_unmasked_passes++;
+		mt_write(m, W + 0x200, raw);
+		return IRQ_HANDLED;
+	}
 	mt_write(m, W + 0x204, 0);
 	return IRQ_WAKE_THREAD;
 }
@@ -302,7 +363,11 @@ static void mt_service(struct mt7932 *m)
 
 		mt_write(m, W + 0x1f0, sw);
 	}
-	mt_write(m, W + 0x200, causes);
+	/* Acknowledge every latched cause, not just the enabled ones: a status
+	 * bit outside the mask has no other owner and would otherwise stay set
+	 * forever.
+	 */
+	mt_write(m, W + 0x200, raw);
 	mt_read(m, W + 0x200);
 
 	mt_data_clean(m);
@@ -360,12 +425,22 @@ static int mt_submit(struct mt7932 *m, struct mt7932_ring *q, size_t length)
 	return 0;
 }
 
-/* One caller, one outstanding command, no retry after uncertain completion. */
-int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, bool wait,
-		      const void *payload, size_t length)
+/* One caller, one outstanding command, no retry after uncertain completion.
+ *
+ * Commands use one of the firmware's two descriptors. The original one carries
+ * the command id in byte 36 and the extension id in byte 41; every existing
+ * caller sends that. The unified one carries a 16-bit command id in bytes
+ * 34-35, an option byte at 43 (ACK, unified command, SET or QUERY) and is
+ * answered with EID 0x01. Both are the descriptors the mt76 connac drivers
+ * send to the same firmware family.
+ */
+static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
+			  bool runtime, bool set, bool wait, bool force_reply,
+			  const void *payload, size_t length, int resp_eid)
 {
 	struct mt7932_ring *q = &m->tx[17];
 	unsigned long flags;
+	u8 *buffer;
 	int ret;
 
 	if (READ_ONCE(m->stopping))
@@ -379,16 +454,42 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 			return -ENOSPC;
 		q->used = 0;
 	}
+	buffer = q->buffers + q->used * STRIDE;
 	if (!++m->seq)
 		m->seq = 1;
-	ret = mt7932_envelope(q->buffers + q->used * STRIDE, STRIDE,
-			      cid, ext, m->seq, runtime, set, wait, payload, length);
-	if (ret < 0)
-		return ret;
+	if (uni) {
+		size_t total = MT7932_UNI_ENVELOPE + length;
+
+		if (!length || total > STRIDE)
+			return -EINVAL;
+		memset(buffer, 0, MT7932_UNI_ENVELOPE);
+		put_unaligned_le32(total | (2U << 23), buffer);
+		put_unaligned_le32(0x10000, buffer + 4);
+		put_unaligned_le16(total - 32, buffer + 32);
+		put_unaligned_le16(cid, buffer + 34);
+		buffer[37] = 0xa0;	/* MCU packet id, long format */
+		buffer[39] = m->seq;
+		/* ACK, unified command, and SET or QUERY. */
+		buffer[43] = BIT(0) | BIT(1) | (set ? BIT(2) : 0);
+		memcpy(buffer + MT7932_UNI_ENVELOPE, payload, length);
+		ret = total;
+	} else {
+		ret = mt7932_envelope(buffer, STRIDE, cid, ext, m->seq,
+				      runtime, set, wait, payload, length);
+		if (ret < 0)
+			return ret;
+		/* Runtime commands take the reply option from the envelope;
+		 * a non-runtime command needs it only when it is a query that
+		 * expects an answer (the MCU register read).
+		 */
+		if (force_reply)
+			buffer[43] |= 1;
+	}
 	reinit_completion(&m->response);
 	spin_lock_irqsave(&m->response_lock, flags);
 	m->waiting = wait ? m->seq : 0;
-	m->waiting_eid = mt7932_reply_eid(cid, runtime);
+	m->waiting_eid = resp_eid >= 0 ? resp_eid :
+			 (uni ? 0x01 : mt7932_reply_eid(cid, runtime));
 	m->reply_length = 0;
 	spin_unlock_irqrestore(&m->response_lock, flags);
 	ret = mt_submit(m, q, ret);
@@ -423,10 +524,30 @@ int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, boo
 	return ret;
 }
 
+int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, bool wait,
+		      const void *payload, size_t length)
+{
+	return mt_request_txd(m, cid, ext, false, runtime, set, wait, false,
+			      payload, length, -1);
+}
+
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length)
 {
 	return mt_request_ext(m, cid, 0, runtime, set, wait, payload, length);
+}
+
+/* A runtime command from the AWDL control channel, in either descriptor
+ * layout. The session commands and the probe path are the only callers.
+ * resp_eid overrides the event id the reply is matched against (-1 to
+ * derive it); the boot ROM's register read answers on its own event.
+ */
+int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool runtime,
+		   bool set, bool wait, bool force_reply, const void *payload,
+		   size_t length, int resp_eid)
+{
+	return mt_request_txd(m, cid, ext, uni, runtime, set, wait, force_reply,
+			      payload, length, resp_eid);
 }
 
 static int mt_command(struct mt7932 *m, u8 cid, const void *payload, size_t length)
@@ -1141,6 +1262,15 @@ static void mt_remove(struct pci_dev *pdev)
 		unregister_netdev(m->netdev);
 		free_netdev(m->netdev);
 		m->netdev = NULL;
+	}
+	if (m->awdl_netdev) {
+		unregister_netdev(m->awdl_netdev);
+		free_netdev(m->awdl_netdev);
+		m->awdl_netdev = NULL;
+	}
+	if (m->awdl_wdev) {
+		kfree(m->awdl_wdev);
+		m->awdl_wdev = NULL;
 	}
 	if (m->wiphy_registered)
 		wiphy_unregister(m->wiphy);

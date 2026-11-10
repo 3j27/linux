@@ -51,6 +51,18 @@ void mt_stop_host(struct mt7932 *m)
 	cancel_work_sync(&m->power_work);
 	cancel_delayed_work_sync(&m->scan_timeout_work);
 	cancel_work_sync(&m->scan_finish_work);
+	/* AWDL producers retire with the rest; the netdev itself goes in
+	 * mt_remove(), where it can hold the RTNL.
+	 */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL)) {
+		if (m->awdl_netdev) {
+			netif_carrier_off(m->awdl_netdev);
+			netif_tx_disable(m->awdl_netdev);
+		}
+		cancel_work_sync(&m->awdl_attach_work);
+		cancel_work_sync(&m->awdl_teardown_work);
+		cancel_delayed_work_sync(&m->awdl_timeout);
+	}
 	/* With all producers joined, this is the sole owner of any remainder. */
 	scan = m->scan_request;
 	m->scan_request = NULL;

@@ -8,6 +8,10 @@
 #include <linux/unaligned.h>
 
 #define MT7932_ENVELOPE 64
+/* The unified command descriptor is shorter: 32 bytes of TXD, a 16-byte
+ * command header, and the body right after byte 47.
+ */
+#define MT7932_UNI_ENVELOPE 48
 #define MT7932_RX_CAPACITY 0x930
 
 /* Byte construction also supports host tests without packed-structure casts. */

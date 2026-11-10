@@ -828,7 +828,13 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	*(struct mt7932 **)wiphy_priv(m->wiphy) = m;
 	set_wiphy_dev(m->wiphy, &m->pdev->dev);
 	ether_addr_copy(m->wiphy->perm_addr, m->mac);
-	m->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+	/* awdl0 is registered by hand with iftype ADHOC so supplicants leave
+	 * it alone, and cfg80211 only lets a netdev come up if its type is in
+	 * interface_modes. The firmware owns both interfaces; no nl80211
+	 * operation is accepted for either type except the station commands.
+	 */
+	m->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
+				    BIT(NL80211_IFTYPE_ADHOC);
 	m->wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
 	m->wiphy->cipher_suites = ciphers;
 	m->wiphy->n_cipher_suites = ARRAY_SIZE(ciphers);
@@ -841,6 +847,14 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	m->wiphy->max_scan_ssids = MT7932_SCAN_SSIDS;
 	m->wiphy->max_scan_ie_len = 600;
 	m->wiphy->reg_notifier = mt_regulatory_notify;
+	/* The AWDL vendor commands are the only way in: nl80211 has no AWDL
+	 * interface type, so the interface is created from the vendor command
+	 * exactly as brcmfmac exposes the same firmware feature.
+	 */
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) && mt7932_awdl_enabled()) {
+		m->wiphy->vendor_commands = mt7932_vendor_cmds;
+		m->wiphy->n_vendor_commands = ARRAY_SIZE(mt7932_vendor_cmds);
+	}
 	/* World roaming may relax NO_IR after observing an AP beacon without
 	 * changing alpha2. Request the callback so firmware's CID0f domain is
 	 * updated through the same idle/scan fence as other regulatory changes.
@@ -942,6 +956,8 @@ int mt_register_regulatory_gate(struct mt7932 *m)
 	}
 	m->wiphy_registered = true;
 	mt_policy_debugfs_init(m);
+	if (IS_ENABLED(CONFIG_MT7932_AWDL))
+		mt_awdl_debugfs_init(m);
 	ret = mt_register_interface(m);
 	if (ret)
 		return ret;
