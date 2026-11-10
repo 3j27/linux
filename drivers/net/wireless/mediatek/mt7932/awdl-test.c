@@ -249,7 +249,59 @@ static void mt_awdl_peer_body_test(struct kunit *test)
 	KUNIT_EXPECT_EQ(test, body[0x36], (u8)13);
 }
 
+static void mt_awdl_native_rx_test(struct kunit *test)
+{
+	/* Prefix captured from a real peer at mt_packet_receive, before parsing. */
+	u8 frame[] = {
+		0x88, 0x00, 0x00, 0x00, 0x33, 0x33, 0, 0, 0, 0xfb,
+		0xc6, 0x6f, 0x21, 0xc5, 0x43, 0x66,
+		0x00, 0x25, 0x00, 0xff, 0x94, 0x73, 0xa0, 0xda, 6, 0,
+		0xaa, 0xaa, 3, 0, 0x17, 0xf2, 8, 0, 3, 4,
+		0x2c, 0x0a, 0, 0, 0x86, 0xdd,
+		0x60, 7, 0x0b, 0, 1, 0xa5, 0x11, 0xff,
+	};
+	struct net_device *dev;
+	struct sk_buff *skb;
+	size_t i;
+
+	KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, sizeof(frame)), 26U);
+	for (i = 0; i < 42; i++)
+		KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, i), 0U);
+	dev = alloc_etherdev(0);
+	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, dev);
+	skb = mt_awdl_test_skb(test, frame, sizeof(frame), sizeof(frame));
+	if (!skb) {
+		free_netdev(dev);
+		KUNIT_FAIL(test, "skb allocation");
+		return;
+	}
+	KUNIT_EXPECT_EQ(test, ieee80211_data_to_8023(skb, dev->dev_addr,
+						  NL80211_IFTYPE_ADHOC), 0);
+	mt7932_awdl_decap(skb);
+	KUNIT_EXPECT_MEMEQ(test, skb->data, frame + 4, ETH_ALEN);
+	KUNIT_EXPECT_MEMEQ(test, skb->data + ETH_ALEN, frame + 10, ETH_ALEN);
+	KUNIT_EXPECT_EQ(test, eth_type_trans(skb, dev), htons(ETH_P_IPV6));
+	KUNIT_EXPECT_EQ(test, skb->len, 8U);
+	KUNIT_EXPECT_EQ(test, skb->data[0], (u8)0x60);
+	kfree_skb(skb);
+	free_netdev(dev);
+	frame[24] |= 0x80; /* A-MSDU: cannot treat subframes as an AWDL envelope. */
+	KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, sizeof(frame)), 0U);
+	frame[24] &= ~0x80;
+	frame[1] = 0x40; /* Protected */
+	KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, sizeof(frame)), 0U);
+	frame[1] = 1; /* To DS */
+	KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, sizeof(frame)), 0U);
+	frame[1] = 0;
+	frame[22] |= 1; /* Fragment */
+	KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, sizeof(frame)), 0U);
+	frame[22] &= ~1;
+	frame[16] ^= 1; /* Wrong BSSID */
+	KUNIT_EXPECT_EQ(test, mt7932_awdl_native_header(frame, sizeof(frame)), 0U);
+}
+
 static struct kunit_case mt_awdl_test_cases[] = {
+	KUNIT_CASE(mt_awdl_native_rx_test),
 	KUNIT_CASE(mt_awdl_peer_body_test),
 	KUNIT_CASE(mt_awdl_wtbl_conflict_test),
 	KUNIT_CASE(mt_awdl_payload_length_test),

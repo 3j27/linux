@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "mt7932.h"
+#include "awdl.h"
 
 static void mt_scan_finish_work(struct work_struct *work);
 static void mt_scan_timeout_work(struct work_struct *work);
@@ -770,6 +771,18 @@ void mt_packet_receive(struct mt7932 *m, const u8 *packet, size_t length)
 		return;
 	if (frame.translated) {
 		mt_data_receive(m, &frame);
+		return;
+	}
+	if (IS_ENABLED(CONFIG_MT7932_AWDL) &&
+	    mt7932_awdl_native_header(frame.data, frame.length)) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&m->response_lock, flags);
+		if (m->awdl_registered && m->awdl_present && m->awdl_enabled &&
+		    (is_multicast_ether_addr(frame.data + 4) ||
+		     ether_addr_equal(frame.data + 4, m->awdl_mac)))
+			mt_awdl_receive(m, &frame);
+		spin_unlock_irqrestore(&m->response_lock, flags);
 		return;
 	}
 	if (!frame.signal_valid || !mt7932_rx_beacon(&frame))

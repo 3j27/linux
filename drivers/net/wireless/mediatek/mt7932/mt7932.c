@@ -435,7 +435,7 @@ static int mt_submit(struct mt7932 *m, struct mt7932_ring *q, size_t length)
  * send to the same firmware family.
  */
 static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
-			  bool runtime, bool set, bool wait,
+			  bool runtime, bool set, bool wait, bool force_reply,
 			  const void *payload, size_t length, int resp_eid)
 {
 	struct mt7932_ring *q = &m->tx[17];
@@ -478,6 +478,12 @@ static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
 				      runtime, set, wait, payload, length);
 		if (ret < 0)
 			return ret;
+		/* Runtime commands take the reply option from the envelope;
+		 * a non-runtime command needs it only when it is a query that
+		 * expects an answer (the MCU register read).
+		 */
+		if (force_reply)
+			buffer[43] |= 1;
 	}
 	reinit_completion(&m->response);
 	spin_lock_irqsave(&m->response_lock, flags);
@@ -521,7 +527,8 @@ static int mt_request_txd(struct mt7932 *m, u16 cid, u8 ext, bool uni,
 int mt_request_ext(struct mt7932 *m, u8 cid, u8 ext, bool runtime, bool set, bool wait,
 		      const void *payload, size_t length)
 {
-	return mt_request_txd(m, cid, ext, false, runtime, set, wait, payload, length, -1);
+	return mt_request_txd(m, cid, ext, false, runtime, set, wait, false,
+			      payload, length, -1);
 }
 
 int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
@@ -536,11 +543,11 @@ int mt_request(struct mt7932 *m, u8 cid, bool runtime, bool set, bool wait,
  * derive it); the boot ROM's register read answers on its own event.
  */
 int mt_request_mcu(struct mt7932 *m, u16 cid, u8 ext, bool uni, bool runtime,
-		   bool set, bool wait, const void *payload, size_t length,
-		   int resp_eid)
+		   bool set, bool wait, bool force_reply, const void *payload,
+		   size_t length, int resp_eid)
 {
-	return mt_request_txd(m, cid, ext, uni, runtime, set, wait, payload,
-			      length, resp_eid);
+	return mt_request_txd(m, cid, ext, uni, runtime, set, wait, force_reply,
+			      payload, length, resp_eid);
 }
 
 static int mt_command(struct mt7932 *m, u8 cid, const void *payload, size_t length)

@@ -61,6 +61,11 @@ enum mt7932_vndr_awdl_cmd_op {
 	MT7932_VNDR_AWDL_OP_ELECTION,
 	MT7932_VNDR_AWDL_OP_BSSID,
 	MT7932_VNDR_AWDL_OP_CHANNELS,
+	/* Diagnostic: one MCU register (CID 0xc0) read or write. Body:
+	 * {__le32 address, __le32 value, u8 write}. A read returns the
+	 * firmware's eight-byte reply as {__le32 address, __le32 value}.
+	 */
+	MT7932_VNDR_AWDL_OP_MCR,
 	MT7932_VNDR_AWDL_OP_LAST
 };
 

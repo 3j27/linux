@@ -3,6 +3,7 @@
 #define MT7932_AWDL_H
 
 #include <linux/if_ether.h>
+#include <linux/ieee80211.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -133,6 +134,16 @@ static inline void mt7932_awdl_peer_body(u8 body[MT7932_AWDL_PEER_BODY_LEN],
 #define MT7932_AWDL_TLV_BSSID 0x00
 #define MT7932_AWDL_TLV_CHANNELS 0x02
 #define MT7932_AWDL_TLV_ENABLE 0x08
+/* Which peer the firmware must take its AWDL sync from. Apple's
+ * `_awdlDevSetSyncMaster` (0x10034a95c) builds this element from a request
+ * whose only used bytes are the master's six-byte address; the element is
+ * {le32 1, master address[6], 20 zero bytes}. Without it this firmware
+ * never gets a TX grant, logs "PSF/AWSF abort by reason[0x2]" every cycle
+ * and then crashes itself with "CrashByIntStaMach TO40 no grant times 39"
+ * / "Wifi ASSERT @ health_monitor.c" about 25 seconds into the session.
+ */
+#define MT7932_AWDL_TLV_SYNC_MASTER 0x09
+#define MT7932_AWDL_SYNC_MASTER_LEN 0x1e
 
 /* CID 0xf7 type 2: the channel sequence the availability windows hop over,
  * { __le32 1, u8 master preference, u8 count, u8 channel[64],
@@ -207,6 +218,38 @@ static inline bool mt7932_awdl_wtbl_conflicts(u16 wtbl, const u8 *infra_wtbl,
 
 static const u8 mt7932_awdl_snap[10] = { 0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2,
 					 0x08, 0x00, 0x03, 0x04 };
+
+/* Native data was observed with HDR_TRANS_ERROR, WTBL 1023 and a 26-byte
+ * QoS header. Only accept complete, unprotected, non-aggregated AWDL MPDUs;
+ * fragmented/encrypted/DS frames require a different receive path.
+ */
+static inline unsigned int mt7932_awdl_native_header(const u8 *data, size_t len)
+{
+	static const u8 bssid[ETH_ALEN] = MT7932_AWDL_BSSID;
+	unsigned int hdrlen = 24;
+	u16 fc;
+
+	if (len < hdrlen)
+		return 0;
+	fc = get_unaligned_le16(data);
+	if ((fc & IEEE80211_FCTL_FTYPE) != IEEE80211_FTYPE_DATA ||
+	    (fc & (IEEE80211_FCTL_VERS | IEEE80211_FCTL_TODS |
+		   IEEE80211_FCTL_FROMDS | IEEE80211_FCTL_MOREFRAGS |
+		   IEEE80211_FCTL_PROTECTED | IEEE80211_FCTL_ORDER)) ||
+	    (fc & IEEE80211_STYPE_NULLFUNC) ||
+	    (get_unaligned_le16(data + 22) & IEEE80211_SCTL_FRAG) ||
+	    memcmp(data + 16, bssid, ETH_ALEN))
+		return 0;
+	if (fc & IEEE80211_STYPE_QOS_DATA) {
+		hdrlen += 2;
+		if (len < hdrlen || (data[24] & IEEE80211_QOS_CTL_A_MSDU_PRESENT))
+			return 0;
+	}
+	if (len < hdrlen + MT7932_AWDL_ENCAP_LEN ||
+	    memcmp(data + hdrlen, mt7932_awdl_snap, sizeof(mt7932_awdl_snap)))
+		return 0;
+	return hdrlen;
+}
 
 /* Unwrap SNAP + AWDL data header into Ethernet II, in place. skb->data is the
  * 802.3 header. Frames that are not AWDL-encapsulated pass unchanged.

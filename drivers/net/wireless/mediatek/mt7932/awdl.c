@@ -106,6 +106,14 @@ int mt7932_awdl_tx_ring;
 module_param_named(awdl_tx_ring, mt7932_awdl_tx_ring, int, 0644);
 MODULE_PARM_DESC(awdl_tx_ring, "Diagnostic: TX ring for AWDL data (0: TX0)");
 
+/* The packet-filter word Apple's driver sends for the AWDL interface
+ * (CID 0x0a). -1 keeps the firmware default. NDIS bits: 1 directed,
+ * 2 multicast, 4 all-multicast, 8 broadcast, 0x20 promiscuous.
+ */
+int mt7932_awdl_rx_filter = -1;
+module_param_named(awdl_rx_filter, mt7932_awdl_rx_filter, int, 0644);
+MODULE_PARM_DESC(awdl_rx_filter, "Diagnostic: packet filter sent at AWDL enable (-1: firmware default)");
+
 /* Diagnostic-only: override MT_TXD0_Q_IDX (bits 31..25) in AWDL transmit
  * descriptors. Upstream mt76 (mt76_connac2_mac.h) defines that field as
  * MT_TXD0_Q_IDX, with MT_LMAC_AC00..03 = 0..3, MT_LMAC_ALTX0 = 0x10,
@@ -129,6 +137,19 @@ int mt7932_awdl_bss_chan = -1;
 module_param_named(awdl_bss_chan, mt7932_awdl_bss_chan, int, 0644);
 MODULE_PARM_DESC(awdl_bss_chan, "Encoded BSS channel value (-1: the associated channel)");
 
+/* Apple's driver rewrites the AWDL BSS identity after AWDL mode is enabled:
+ * _gl_io80211_set_awdl_initial calls _awdlDevUpdateMacAddress once
+ * _wlanoidSetAWDLMode succeeds, and that stores the new address in the BSS
+ * and calls _awdlDevUpdateBss, which sends CID 0x11 (inactive), CID 0x12,
+ * CID 0x11 (active) and CID 0x12 again. This driver only sends those in its
+ * create path, before the AWDL session element, so the firmware may keep an
+ * own-MAC binding that predates AWDL mode. Replay the same sequence after the
+ * session element unless this is turned off.
+ */
+int mt7932_awdl_reactivate = 1;
+module_param_named(awdl_reactivate, mt7932_awdl_reactivate, int, 0644);
+MODULE_PARM_DESC(awdl_reactivate, "Re-apply the BSS activation after enabling the AWDL session (default 1)");
+
 int mt7932_awdl_txd_qidx = -1;
 module_param_named(awdl_txd_qidx, mt7932_awdl_txd_qidx, int, 0644);
 MODULE_PARM_DESC(awdl_txd_qidx, "Diagnostic: force MT_TXD0_Q_IDX (-1: built value 0x10)");
@@ -149,6 +170,19 @@ int mt7932_awdl_omac = 1;
 module_param_named(awdl_omac, mt7932_awdl_omac, int, 0644);
 MODULE_PARM_DESC(awdl_omac, "Own-MAC (OM) index of the AWDL BSS (station is 0)");
 
+/* The firmware's health monitor asserts ("CrashByIntStaMach TO40 no grant
+ * times 39") when the AWDL node never receives a TX grant, which is what
+ * happens when it has no sync master. Apple tells it the master's address
+ * with element 9 whenever the daemon's peer cache changes. This driver uses
+ * the first peer it has a record for and re-sends the element after the
+ * session is enabled and after each peer add, so the session can survive
+ * without a userspace keepalive.
+ */
+int mt7932_awdl_sync = 1;
+module_param_named(awdl_sync, mt7932_awdl_sync, int, 0644);
+MODULE_PARM_DESC(awdl_sync, "Send the peer sync-master element 9 (default 1)");
+
+
 #define MT7932_AWDL_IFNAME "awdl0"
 #define MT7932_AWDL_CREATE_TIMEOUT (5 * HZ)
 #define MT7932_AWDL_DESTROY_TIMEOUT (10 * HZ)
@@ -157,6 +191,7 @@ MODULE_PARM_DESC(awdl_omac, "Own-MAC (OM) index of the AWDL BSS (station is 0)")
  * the interface paths that come first.
  */
 static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl);
+static int mt_awdl_sync_first_peer(struct mt7932 *m);
 static int mt_awdl_bss_activate(struct mt7932 *m, bool active, const u8 *mac,
 				u8 wtbl);
 static void mt_awdl_peer_reset(struct mt7932 *m);
@@ -930,9 +965,16 @@ void mt_awdl_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 		return;
 	}
 	skb_put_data(skb, frame->data, frame->length);
+	if (!frame->translated &&
+	    ieee80211_data_to_8023(skb, netdev->dev_addr, NL80211_IFTYPE_ADHOC)) {
+		netdev->stats.rx_dropped++;
+		dev_kfree_skb_any(skb);
+		return;
+	}
+	/* decap expects the Ethernet header; eth_type_trans pulls it. */
+	mt7932_awdl_decap(skb);
 	skb->protocol = eth_type_trans(skb, netdev);
 	skb->ip_summed = CHECKSUM_NONE;
-	mt7932_awdl_decap(skb);
 	m->rx_ethernet++;
 	netif_rx(skb);
 	dev_dbg_ratelimited(&m->pdev->dev, "AWDL_ETHERNET_RX: bytes=%zu wtbl=%u\n",
@@ -989,6 +1031,29 @@ static int mt_awdl_tlv_cmd(struct mt7932 *m, u32 type, const void *payload,
 	return ret;
 }
 
+/* One MCU register access, CID 0xc0. Apple's driver uses this in
+ * `set_awdl_initial` for a read-modify-write of 0x820e2060 (bit 3), the
+ * hardware AWDL-mode bit that no other host path touches. A SET needs no
+ * reply; a QUERY is answered with the register value.
+ */
+static int mt_awdl_mcr(struct mt7932 *m, u32 address, u32 value, bool write,
+		       u32 *result)
+{
+	u8 body[8];
+	int ret;
+
+	put_unaligned_le32(address, body);
+	put_unaligned_le32(value, body + 4);
+	ret = mt_request_mcu(m, 0xc0, 0, false, false, write, !write, !write,
+			     body, sizeof(body), -1);
+	if (ret || write)
+		return ret;
+	if (m->reply_length < 40)
+		return -EPROTO;
+	*result = get_unaligned_le32(m->reply + 36);
+	return 0;
+}
+
 /* command_mutex held. CID 0x12, the description the firmware keeps for one
  * BSS. The firmware takes the BSS index, the active byte, the operation mode
  * and the service-set length from the first four bytes and the channel from
@@ -1035,6 +1100,12 @@ static int mt_awdl_bss_info(struct mt7932 *m, bool active, u8 wtbl)
 	 * a stale WTBL value used to land here by accident.
 	 */
 	body[0x3a] = 2;
+	/* body[0x3b] is the BSS's own-MAC (OMAC) index; the firmware's
+	 * BSS configuration prints it as OX. Zero makes the AWDL BSS fall
+	 * back to the station's own-MAC entry, so the radio never matches
+	 * unicast addressed to the AWDL address even though the TX
+	 * descriptor names OM1. */
+	body[0x3b] = mt7932_awdl_omac;
 	memcpy(body + 0x4a, m->awdl_mac, ETH_ALEN);
 	body[0x5a] = 4;
 
@@ -1087,6 +1158,26 @@ static int mt_awdl_bss_queue(struct mt7932 *m)
 	return mt_request(m, 0x6b, true, true, false, queue, sizeof(queue));
 }
 
+/* command_mutex held. The BSS identity refresh Apple performs after AWDL
+ * mode is enabled (see mt7932_awdl_reactivate).
+ */
+static int mt_awdl_bss_reactivate(struct mt7932 *m)
+{
+	u8 wtbl = READ_ONCE(m->awdl_bss_wtbl) ?: READ_ONCE(m->awdl_wtbl);
+	int ret;
+
+	ret = mt_awdl_bss_activate(m, false, m->awdl_mac, wtbl);
+	if (ret)
+		return ret;
+	ret = mt_awdl_bss_info(m, false, 0xff);
+	if (ret)
+		return ret;
+	ret = mt_awdl_bss_activate(m, true, m->awdl_mac, wtbl);
+	if (ret)
+		return ret;
+	return mt_awdl_bss_info(m, true, wtbl);
+}
+
 /* command_mutex held. Turn the firmware's AWDL session on or off: element
  * type 8, a word that is always 1 and the on/off flag. Channel selection is
  * a different element and the driver does not build it yet, so this brings
@@ -1097,6 +1188,35 @@ int mt_awdl_session(struct mt7932 *m, bool enable)
 	u8 payload[6];
 	int ret;
 
+	/* The per-adapter packet filter Apple's driver installs for the AWDL
+	 * interface, CID 0x0a (mt76 MCU_CE_CMD_SET_RX_FILTER): a filter word
+	 * and 64 reserved bytes. -1 keeps the firmware default. It is not
+	 * enabled until a test has established the firmware's semantics.
+	 */
+	if (enable && mt7932_awdl_rx_filter >= 0) {
+		u8 filter[68] = {};
+
+		put_unaligned_le32(mt7932_awdl_rx_filter, filter);
+		ret = mt_request(m, 0x0a, true, true, false, filter,
+				 sizeof(filter));
+		if (ret)
+			return ret;
+	}
+
+	/* Apple's `_awdlDevEnableRequest` activates the BSS, updates it, and
+	 * only then sends element 8. Sending element 8 first leaves the
+	 * firmware's AWDL timeline disabled and every TSF sync deferred, so
+	 * the PSF/AWSF scheduler never gets a grant.
+	 */
+	if (enable && mt7932_awdl_reactivate) {
+		ret = mt_awdl_bss_reactivate(m);
+		if (ret) {
+			dev_err(&m->pdev->dev,
+				"AWDL_BSS_REACTIVATE_FAILED: %d\n", ret);
+			return ret;
+		}
+	}
+
 	put_unaligned_le32(1, payload);
 	put_unaligned_le16(enable ? 1 : 0, payload + 4);
 	ret = mt_awdl_tlv_cmd(m, MT7932_AWDL_TLV_ENABLE, payload,
@@ -1105,6 +1225,16 @@ int mt_awdl_session(struct mt7932 *m, bool enable)
 		return ret;
 
 	WRITE_ONCE(m->awdl_enabled, enable);
+	/* With no sync master the firmware never gets a grant and its health
+	 * monitor kills it. The peer may already be known when the session
+	 * comes up; otherwise the peer-add path sends this element.
+	 */
+	if (enable) {
+		ret = mt_awdl_sync_first_peer(m);
+		if (ret)
+			dev_warn(&m->pdev->dev,
+				 "AWDL_SYNC_MASTER_FAILED: %d\n", ret);
+	}
 	dev_info(&m->pdev->dev, "AWDL session %s\n",
 		 enable ? "enabled" : "disabled");
 	return 0;
@@ -1123,6 +1253,37 @@ int mt_awdl_set_bssid(struct mt7932 *m, const u8 *mac)
 
 	return mt_awdl_tlv_cmd(m, MT7932_AWDL_TLV_BSSID, payload,
 			       sizeof(payload));
+}
+
+/* command_mutex held. Element type 9: tell the firmware which peer is the
+ * AWDL sync master. The payload is the one `_awdlDevSetSyncMaster` builds:
+ * a leading word 1, the master's address, and twenty zero bytes. */
+static int mt_awdl_sync_master(struct mt7932 *m, const u8 mac[ETH_ALEN])
+{
+	u8 payload[MT7932_AWDL_SYNC_MASTER_LEN] = {};
+
+	put_unaligned_le32(1, payload);
+	memcpy(payload + 4, mac, ETH_ALEN);
+	return mt_awdl_tlv_cmd(m, MT7932_AWDL_TLV_SYNC_MASTER, payload,
+			       sizeof(payload));
+}
+
+/* command_mutex held. Pick the first peer record as the sync master. */
+static int mt_awdl_sync_first_peer(struct mt7932 *m)
+{
+	unsigned long flags;
+	u8 mac[ETH_ALEN];
+	bool found = false;
+
+	if (!mt7932_awdl_sync)
+		return 0;
+	spin_lock_irqsave(&m->response_lock, flags);
+	if (m->awdl_peer_count) {
+		ether_addr_copy(mac, m->awdl_peer_mac[0]);
+		found = true;
+	}
+	spin_unlock_irqrestore(&m->response_lock, flags);
+	return found ? mt_awdl_sync_master(m, mac) : 0;
 }
 
 /* command_mutex held. The channel list, CID 0xf7 element type 2. The
@@ -1314,6 +1475,16 @@ int mt_awdl_peer_op(struct mt7932 *m, bool add, const u8 mac[ETH_ALEN])
 	dev_info(&m->pdev->dev,
 		 "AWDL_PEER_ADDED: mac=%pM station=%u wtbl=%u (acceptance unconfirmed)\n",
 		 mac, station, wtbl);
+	/* From now on this peer can be the firmware's sync source; without
+	 * it the session dies with the health monitor's no-grant assert.
+	 */
+	if (READ_ONCE(m->awdl_enabled) && mt7932_awdl_sync) {
+		int sync_ret = mt_awdl_sync_master(m, mac);
+
+		if (sync_ret)
+			dev_warn(&m->pdev->dev,
+				 "AWDL_SYNC_MASTER_FAILED: %d\n", sync_ret);
+	}
 	return 0;
 }
 
@@ -1459,6 +1630,26 @@ static int mt_vendor_awdl_cmd_handler(struct wiphy *wiphy, struct wireless_dev *
 		err = mt_awdl_peer_op(m, op == MT7932_VNDR_AWDL_OP_PEER_ADD,
 				      cmd->body);
 		break;
+	case MT7932_VNDR_AWDL_OP_MCR: {
+		u8 reply[8];
+		u32 value = 0;
+		u32 address;
+
+		if (len != (int)sizeof(*cmd) + 9) {
+			err = -EINVAL;
+			break;
+		}
+		address = get_unaligned_le32(cmd->body);
+		err = mt_awdl_mcr(m, address,
+				  get_unaligned_le32(cmd->body + 4),
+				  cmd->body[8] != 0, &value);
+		if (err)
+			break;
+		put_unaligned_le32(address, reply);
+		put_unaligned_le32(value, reply + 4);
+		err = mt_vendor_awdl_state_reply(wiphy, reply, sizeof(reply));
+		break;
+	}
 	case MT7932_VNDR_AWDL_OP_STATE: {
 		void *reply = NULL;
 		size_t reply_len = 0;
@@ -1506,9 +1697,15 @@ static int mt_vendor_raw_handler(struct wiphy *wiphy, struct wireless_dev *wdev,
 	    body_len > MT7932_AWDL_BODY_MAX)
 		return -EINVAL;
 	mutex_lock(&m->command_mutex);
+	/* A SET is not answered by this firmware. Waiting for one leaks a
+	 * command-ring slot whenever it is not answered, and enough of them
+	 * wedge every later command; the raw path therefore only waits for
+	 * commands that are actually queries.
+	 */
 	err = mt_request_mcu(m, get_unaligned_le16(&cmd->cid), cmd->ext, cmd->uni,
-			     cmd->runtime, cmd->set, cmd->wait, cmd->body, body_len,
-			     cmd->resp_eid ? (int)cmd->resp_eid : -1);
+			     cmd->runtime, cmd->set,
+			     cmd->wait && !cmd->set, false, cmd->body,
+			     body_len, cmd->resp_eid ? (int)cmd->resp_eid : -1);
 	if (!err && cmd->wait && m->reply_length > 36)
 		err = mt_vendor_awdl_state_reply(wiphy, m->reply + 36,
 						 m->reply_length - 36);

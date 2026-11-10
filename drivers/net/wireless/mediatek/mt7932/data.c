@@ -256,10 +256,29 @@ void mt_data_receive(struct mt7932 *m, const struct mt7932_rx_frame *frame)
 	if (IS_ENABLED(CONFIG_MT7932_AWDL) && READ_ONCE(m->awdl_registered) &&
 	    READ_ONCE(m->awdl_present)) {
 		u16 wtbl = READ_ONCE(m->awdl_wtbl);
+		bool have_mac = !is_zero_ether_addr(m->awdl_mac);
+		bool peer = false;
+		unsigned int i;
 
 		if (!wtbl && mt7932_awdl_wtbl > 0 && mt7932_awdl_wtbl <= 0xff)
 			wtbl = mt7932_awdl_wtbl;
-		if ((wtbl && frame->wtbl == wtbl) ||
+		/* The firmware translates an AWDL peer's data frames with that
+		 * peer's own WTBL, not the BSS's, so the BSS entry alone misses
+		 * them and they fall into the station gate below. The AWDL
+		 * interface address is the other stable identity: a translated
+		 * Ethernet frame addressed to or from it belongs to awdl0 even
+		 * when the descriptor names the peer's entry.
+		 */
+		for (i = 0; i < MT_AWDL_PEERS; i++)
+			if (READ_ONCE(m->awdl_peer_wtbl[i]) &&
+			    frame->wtbl == READ_ONCE(m->awdl_peer_wtbl[i])) {
+				peer = true;
+				break;
+			}
+		if ((wtbl && frame->wtbl == wtbl) || peer ||
+		    (frame->translated && have_mac &&
+		     (ether_addr_equal(frame->data, m->awdl_mac) ||
+		      ether_addr_equal(frame->data + ETH_ALEN, m->awdl_mac))) ||
 		    mt7932_awdl_payload(frame->data, frame->length)) {
 			mt_awdl_receive(m, frame);
 			goto unlock;
